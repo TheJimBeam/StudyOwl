@@ -5,6 +5,7 @@ Controls hint level progression, attempt counting, and escalation logic.
 All student interactions flow through process_attempt().
 """
 
+import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -19,6 +20,32 @@ from . import answer_verifier
 from . import alert_service
 from . import subject_router
 from . import travily_service
+
+
+async def _fetch_recent_attempts(db: AsyncSession, session_id) -> list[str]:
+    """
+    Fetch the most recent attempt texts for a session, oldest-to-newest. The
+    cap keeps both the SQL row count and the prompt-token count bounded on
+    long, stuck sessions.
+
+    The limit is `max(conversation_history_limit, max_fails_before_review)` so
+    `len(previous_attempts)` is always large enough for the review-mode
+    threshold check in `process_attempt` to fire at the right moment, even if
+    someone tunes `conversation_history_limit` down.
+    """
+    limit = max(
+        settings.conversation_history_limit,
+        settings.max_fails_before_review,
+    )
+    result = await db.execute(
+        select(Attempt.attempt_text)
+        .where(Attempt.session_id == session_id)
+        .order_by(Attempt.created_at.desc())
+        .limit(limit)
+    )
+    # Query is desc-then-limit so the DB can stop early; reverse to restore
+    # chronological order for the hint prompt.
+    return [row[0] for row in reversed(result.all())]
 
 
 async def start_session(
@@ -76,21 +103,21 @@ async def process_attempt(
         Dict with keys: status ('correct'|'wrong'), hint (if wrong),
         hint_level (if wrong), message.
     """
-    # Distress check (fires alert regardless of attempt correctness)
+    # Distress check (fires alert regardless of attempt correctness). Local
+    # regex match — safe to await even though it never hits the network.
     if await hint_engine.detect_distress(attempt_text):
         await _trigger_alert(db, session, reason="Student distress signal")
 
-    # Fetch all previous attempt texts for this session using async-safe SQL
-    result = await db.execute(
-        select(Attempt.attempt_text).where(Attempt.session_id == session.id)
-    )
-    previous_attempts = [row[0] for row in result.all()]
-
-    # Verify the attempt
-    is_correct = await answer_verifier.check(
-        question=session.question,
-        answer=attempt_text,
-        subject=session.subject,
+    # Run the history fetch (DB) concurrently with answer verification (often
+    # an LLM call). They're independent: verification doesn't read history,
+    # and the history query doesn't depend on the verdict.
+    previous_attempts, is_correct = await asyncio.gather(
+        _fetch_recent_attempts(db, session.id),
+        answer_verifier.check(
+            question=session.question,
+            answer=attempt_text,
+            subject=session.subject,
+        ),
     )
 
     # Log the attempt

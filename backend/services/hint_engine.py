@@ -10,12 +10,13 @@ Hint levels:
   3 — Near-answer with all values filled in. Student must do the final step.
 """
 
-import asyncio
-from openai import AzureOpenAI
+import re
+
+from openai import AsyncAzureOpenAI
 from config import settings
 from . import answer_verifier
 
-client = AzureOpenAI(
+async_client = AsyncAzureOpenAI(
     api_key=settings.azure_openai_api_key,
     api_version="2024-10-01-preview",
     azure_endpoint=settings.azure_openai_endpoint,
@@ -62,24 +63,20 @@ async def get_hint(
         else "None yet."
     )
 
-    # Wrap sync OpenAI call in thread pool to avoid blocking event loop
-    def _call_openai():
-        return client.chat.completions.create(
-            model=settings.azure_openai_deployment,
-            max_completion_tokens=300,
-            messages=[
-                {"role": "system", "content": HINT_SYSTEM.format(level=level, subject=subject)},
-                {
-                    "role": "user",
-                    "content": (
-                        f"Question: {question}\n\n"
-                        f"Student's previous attempts:\n{attempts_text}"
-                    ),
-                }
-            ],
-        )
-
-    response = await asyncio.to_thread(_call_openai)
+    response = await async_client.chat.completions.create(
+        model=settings.azure_openai_deployment,
+        max_completion_tokens=300,
+        messages=[
+            {"role": "system", "content": HINT_SYSTEM.format(level=level, subject=subject)},
+            {
+                "role": "user",
+                "content": (
+                    f"Question: {question}\n\n"
+                    f"Student's previous attempts:\n{attempts_text}"
+                ),
+            },
+        ],
+    )
     return response.choices[0].message.content.strip()
 
 
@@ -94,50 +91,63 @@ async def get_direct_answer(question: str, subject: str) -> str:
         if direct_answer:
             return direct_answer
 
-    # Wrap sync OpenAI call in thread pool to avoid blocking event loop
-    def _call_openai():
-        return client.chat.completions.create(
-            model=settings.azure_openai_deployment,
-            max_completion_tokens=150,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are StudyOwl, a homework assistant. The student has already seen all three hints. "
-                        "Provide the direct correct answer clearly and concisely. Do not add extra unrelated details."
-                    ),
-                },
-                {"role": "user", "content": f"Question: {question}"},
-            ],
-        )
-
-    response = await asyncio.to_thread(_call_openai)
+    response = await async_client.chat.completions.create(
+        model=settings.azure_openai_deployment,
+        max_completion_tokens=150,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are StudyOwl, a homework assistant. The student has already seen all three hints. "
+                    "Provide the direct correct answer clearly and concisely. Do not add extra unrelated details."
+                ),
+            },
+            {"role": "user", "content": f"Question: {question}"},
+        ],
+    )
     return response.choices[0].message.content.strip()
+
+
+# Phrases that should trip a distress alert. Drawn from the original LLM-based
+# detector's system prompt plus a few obvious synonyms / contractions students
+# actually type. Matched case-insensitively against whitespace-normalized text.
+_DISTRESS_PHRASES = (
+    "i give up",
+    "i quit",
+    "i'm done",
+    "im done",
+    "i hate this",
+    "i hate it",
+    "i can't do this",
+    "i cant do this",
+    "i can't do it",
+    "i cant do it",
+    "i don't understand anything",
+    "i dont understand anything",
+    "i don't get it at all",
+    "i dont get it at all",
+    "this makes no sense",
+    "this is impossible",
+    "too hard",
+    "i'm so stuck",
+    "im so stuck",
+)
+_DISTRESS_RE = re.compile(
+    "|".join(re.escape(p) for p in _DISTRESS_PHRASES),
+    re.IGNORECASE,
+)
 
 
 async def detect_distress(message: str) -> bool:
     """
-    Use Claude to detect if a student message signals genuine distress.
-    Returns True if the student should trigger a teacher alert immediately.
-    """
-    # Wrap sync OpenAI call in thread pool to avoid blocking event loop
-    def _call_openai():
-        return client.chat.completions.create(
-            model=settings.azure_openai_deployment,
-            max_completion_tokens=10,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You detect student distress in homework messages. "
-                        "Reply with only 'yes' or 'no'. "
-                        "Examples of distress: 'I give up', 'I don't understand anything', "
-                        "'this makes no sense', 'I hate this', 'I can't do this'."
-                    ),
-                },
-                {"role": "user", "content": message},
-            ],
-        )
+    Detect if a student message signals distress strong enough to alert a teacher.
 
-    response = await asyncio.to_thread(_call_openai)
-    return response.choices[0].message.content.strip().lower() == "yes"
+    Uses a curated phrase list — the same examples the previous LLM-based detector
+    was prompted with, plus common contractions. Local match, zero LLM cost, zero
+    network latency. Async signature is kept so callers don't change.
+    """
+    if not message:
+        return False
+    # Collapse whitespace so "i  give    up" still matches.
+    normalized = re.sub(r"\s+", " ", message).strip()
+    return _DISTRESS_RE.search(normalized) is not None

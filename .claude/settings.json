@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl remote set-url origin https://TheJimBeam@github.com/TheJimBeam/StudyOwl.git)",
+      "Bash(git -C /Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl remote -v)",
+      "Bash(git credential-osxkeychain *)",
+      "Bash(/Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl/.venv/bin/python -m pytest tests/ -q)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(../.venv/bin/python -m pytest tests/ -q)",
+      "Bash(file /Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl/.venv/bin/python 2>&1)",
+      "Read(//Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl/.venv/bin/**)",
+      "Bash(python3 -c \"import pytest, sympy; print\\('ok'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('/Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl/backend/routers/auth.py'\\).read\\(\\)\\); print\\('auth.py parses cleanly'\\)\")",
+      "Bash(npm run *)",
+      "Bash(python3 -c 'import ast; ast.parse\\(open\\('\\\\''__TRACKED_VAR__'\\\\''\\).read\\(\\)\\); print\\('\\\\''OK: __TRACKED_VAR__'\\\\''\\)')",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('services/__init__.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import pydantic_settings, sqlalchemy; print\\('pydantic_settings:', pydantic_settings.__version__\\); print\\('sqlalchemy:', sqlalchemy.__version__\\)\")",
+      "Bash(python3 -c 'import ast; ast.parse\\(open\\('\\\\''__TRACKED_VAR__'\\\\''\\).read\\(\\)\\)')",
+      "Bash(ls /Users/mirajpudasaini/Isla 2>&1 | head -5; echo \"---\"; ls /Users/mirajpudasaini/Zola/1.Personal/spain/StudyOwl/frontend/src/ 2>&1)",
+      "Read(//Users/mirajpudasaini/Isla/**)",
+      "Bash(cat /Users/mirajpudasaini/Isla/1.Personal/spain/StudyOwl/frontend/src/auth/AuthContext.tsx | head -3 && echo \"---\" && rm -rf /Users/mirajpudasaini/Isla && echo \"removed typo dir\")"
+    ],
+    "additionalDirectories": [
+      "/Users/mirajpudasaini/Isla/1.Personal/spain/StudyOwl/frontend/src/auth",
+      "/Users/mirajpudasaini/Isla"
+    ]
+  }
+}

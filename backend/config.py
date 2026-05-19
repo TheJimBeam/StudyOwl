@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     max_fails_before_alert: int = 4
     inactivity_timeout_minutes: int = 10
 
+    # Caps the number of prior attempts fed back into the hint prompt and
+    # fetched from the attempts table per turn. Higher = better continuity,
+    # more tokens per call and more DB rows.
+    conversation_history_limit: int = 5
+
     # Travily learning resource API
     travily_api_key: str = ""
     travily_api_url: str = ""

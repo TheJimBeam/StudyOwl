@@ -4,14 +4,13 @@ Answer verifier — check if a student's answer is correct.
 Uses SymPy for math; Claude for other subjects.
 """
 
-import asyncio
-from openai import AzureOpenAI
+from openai import AsyncAzureOpenAI
 import re
 import sympy
 from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application
 from config import settings
 
-client = AzureOpenAI(
+async_client = AsyncAzureOpenAI(
     api_key=settings.azure_openai_api_key,
     api_version="2024-10-01-preview",
     azure_endpoint=settings.azure_openai_endpoint,
@@ -183,26 +182,22 @@ async def _verify_with_claude(question: str, answer: str, subject: str) -> bool:
     """
     Use Claude to verify if an answer is correct.
     """
-    # Wrap sync OpenAI call in thread pool to avoid blocking event loop
-    def _call_openai():
-        return client.chat.completions.create(
-            model=settings.azure_openai_deployment,
-            max_completion_tokens=50,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert homework grader. "
-                        "Evaluate if the student's answer to the question is correct. "
-                        "Respond with ONLY 'yes' or 'no'. Accept reasonable variations and rounding."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Question: {question}\n\nStudent's answer: {answer}",
-                }
-            ],
-        )
-
-    response = await asyncio.to_thread(_call_openai)
+    response = await async_client.chat.completions.create(
+        model=settings.azure_openai_deployment,
+        max_completion_tokens=50,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert homework grader. "
+                    "Evaluate if the student's answer to the question is correct. "
+                    "Respond with ONLY 'yes' or 'no'. Accept reasonable variations and rounding."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Question: {question}\n\nStudent's answer: {answer}",
+            },
+        ],
+    )
     return response.choices[0].message.content.strip().lower() == "yes"
