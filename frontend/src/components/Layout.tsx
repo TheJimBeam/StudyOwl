@@ -10,8 +10,8 @@ export function Layout() {
   const displayName = user?.name ?? (user?.role === 'teacher' ? 'Teacher' : 'Student')
 
   return (
-    <div>
-      <nav className="bg-indigo-900 text-white px-3 py-3 sm:p-4">
+    <div className="h-screen flex flex-col">
+      <nav className="bg-indigo-900 text-white px-3 py-3 sm:p-4 shrink-0 shadow-md z-10">
         <div className="max-w-6xl mx-auto flex justify-between items-center gap-2">
           <Link to="/" className="text-xl sm:text-2xl font-bold whitespace-nowrap">
             🦉 StudyOwl
@@ -29,7 +29,9 @@ export function Layout() {
           </div>
         </div>
       </nav>
-      <Outlet />
+      <main className="flex-1 overflow-y-auto">
+        <Outlet />
+      </main>
     </div>
   )
 }

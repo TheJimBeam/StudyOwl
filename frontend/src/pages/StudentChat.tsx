@@ -14,6 +14,8 @@ import { useAuth } from '../auth/AuthContext'
 import PhotoUpload from '../components/PhotoUpload'
 import ProgressChart from '../components/ProgressChart'
 import QuestionHistoryPanel from '../components/QuestionHistoryPanel'
+import { PracticeAgent } from '../components/PracticeAgent'
+import type { ConceptMemoryItem } from '../api/studyowl'
 
 interface LearningResource {
   title: string
@@ -48,6 +50,12 @@ export const StudentChat: React.FC = () => {
   const [finalAnswer, setFinalAnswer] = useState<string | null>(null)
   const [progress, setProgress] = useState<StudentProgress | null>(null)
   const [progressError, setProgressError] = useState<string | null>(null)
+  // Weakest concept from the knowledge-graph memory — feeds the Practice Agent
+  // CTA. Refetched whenever historyVersion bumps OR a practice attempt resolves
+  // (memoryVersion below).
+  const [weakestConcept, setWeakestConcept] = useState<ConceptMemoryItem | null>(null)
+  const [memoryVersion, setMemoryVersion] = useState(0)
+  const bumpMemory = () => setMemoryVersion((v) => v + 1)
   // Bumped after every session-state change that the history panel cares about
   // (created / resolved / review / final-answer revealed). The panel watches
   // this and re-fetches page 1 when it changes.
@@ -284,7 +292,21 @@ export const StudentChat: React.FC = () => {
     api.getProgress(user.id)
       .then((data) => setProgress(data))
       .catch((err) => setProgressError(err.message))
-  }, [user])
+    // historyVersion is bumped on session created / correct / review / final-answer —
+    // exactly the events that change progress, so refresh the analytics card in
+    // lockstep with the QuestionHistoryPanel.
+  }, [user, historyVersion])
+
+  // Knowledge-graph memory drives the Practice Agent CTA. Refetch whenever a
+  // homework session resolves (historyVersion) or a practice attempt closes
+  // the loop (memoryVersion). Failure is non-fatal — the agent falls back to
+  // a subject picker.
+  useEffect(() => {
+    if (!user) return
+    api.getStudentMemory(user.id)
+      .then((data) => setWeakestConcept(data.concepts[0] ?? null))
+      .catch(() => setWeakestConcept(null))
+  }, [user, historyVersion, memoryVersion])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-3 sm:p-4">
@@ -415,6 +437,14 @@ export const StudentChat: React.FC = () => {
             />
           </div>
         )}
+
+        <div className="mb-6">
+          <PracticeAgent
+            weakestConcept={weakestConcept}
+            defaultSubject="math"
+            onAttemptResolved={bumpMemory}
+          />
+        </div>
 
         <div className="bg-white rounded-lg shadow-lg p-4 sm:p-6 mb-6">
           {sessionStage === 'start' ? (

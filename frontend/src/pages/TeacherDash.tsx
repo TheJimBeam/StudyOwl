@@ -1,7 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/studyowl'
 import type {
+  CriticDecisionsResponse,
+  HistorySession,
   StudentMemoryResponse,
   TeacherAlert,
   TeacherAlertsResponse,
@@ -9,6 +11,26 @@ import type {
 } from '../api/studyowl'
 import { usePolling } from '../hooks/usePolling'
 import { ConceptMastery } from '../components/ConceptMastery'
+import { CriticDecisionsPanel } from '../components/CriticDecisionsPanel'
+
+const TABS = [
+  { key: 'subjects', label: 'Subjects' },
+  { key: 'sessions', label: 'Recent Sessions' },
+  { key: 'concepts', label: 'Concept Mastery' },
+  { key: 'critic', label: 'Recent Critics' },
+] as const
+type TabKey = (typeof TABS)[number]['key']
+
+// Infinite-scroll batch sizes. The alerts panel and each analytics tab start
+// with a small visible window and grow as the user scrolls.
+const SESSIONS_PAGE_SIZE = 2
+const ALERTS_INITIAL = 2
+const ALERTS_STEP = 5
+const TAB_INITIAL = 2
+const TAB_STEP = 5
+// Trigger "load more" when the user is within this many pixels of the bottom
+// of a scroll container.
+const SCROLL_THRESHOLD_PX = 80
 
 const SEVERITY_BADGE: Record<TeacherAlert['severity'], { label: string; classes: string }> = {
   high: { label: '🔴 HIGH', classes: 'bg-red-100 text-red-800 border-red-300' },
@@ -50,8 +72,24 @@ export const TeacherDash: React.FC = () => {
   const [studentsError, setStudentsError] = useState<string | null>(null)
   const [selectedStudentProgress, setSelectedStudentProgress] = useState<StudentProgress | null>(null)
   const [selectedStudentMemory, setSelectedStudentMemory] = useState<StudentMemoryResponse | null>(null)
+  const [criticDecisions, setCriticDecisions] = useState<CriticDecisionsResponse | null>(null)
   const [loadingStudent, setLoadingStudent] = useState(false)
   const [studentDetailError, setStudentDetailError] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<TabKey>('subjects')
+  const [sessionHistory, setSessionHistory] = useState<HistorySession[]>([])
+  const [sessionsTotal, setSessionsTotal] = useState(0)
+  const [sessionsLoading, setSessionsLoading] = useState(false)
+  const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
+  const [sessionsError, setSessionsError] = useState<string | null>(null)
+  // Infinite-scroll windows — incremented by scroll handlers and the
+  // auto-fill effect (which keeps loading until the scroll container actually
+  // overflows; otherwise the user has no scrollbar to scroll with).
+  const [visibleAlerts, setVisibleAlerts] = useState(ALERTS_INITIAL)
+  const [visibleSubjects, setVisibleSubjects] = useState(TAB_INITIAL)
+  const [visibleConcepts, setVisibleConcepts] = useState(TAB_INITIAL)
+  const [visibleCritic, setVisibleCritic] = useState(TAB_INITIAL)
+  const alertsScrollRef = useRef<HTMLDivElement | null>(null)
+  const tabContentRef = useRef<HTMLDivElement | null>(null)
   // In-flight ack/resolve to prevent double-clicks. Keyed by alert ID.
   const [actionInFlight, setActionInFlight] = useState<Record<string, boolean>>({})
   // Errors from ack/resolve actions (separate from polling errors).
@@ -145,9 +183,19 @@ export const TeacherDash: React.FC = () => {
   }
 
   useEffect(() => {
+    // Reset infinite-scroll windows when the selected student changes so the
+    // next student starts fresh from the top of each tab.
+    setVisibleSubjects(TAB_INITIAL)
+    setVisibleConcepts(TAB_INITIAL)
+    setVisibleCritic(TAB_INITIAL)
+
     if (!selectedStudentId) {
       setSelectedStudentProgress(null)
       setSelectedStudentMemory(null)
+      setCriticDecisions(null)
+      setSessionHistory([])
+      setSessionsTotal(0)
+      setSessionsError(null)
       return
     }
 
@@ -155,12 +203,17 @@ export const TeacherDash: React.FC = () => {
       setLoadingStudent(true)
       setStudentDetailError(null)
       try {
-        const [progress, memory] = await Promise.all([
+        const [progress, memory, critic] = await Promise.all([
           api.getStudentProgress(selectedStudentId),
           api.getStudentMemory(selectedStudentId).catch(() => null),
+          api.getCriticDecisions(selectedStudentId, {
+            limit: 20,
+            onlyRejects: true,
+          }).catch(() => null),
         ])
         setSelectedStudentProgress(progress)
         setSelectedStudentMemory(memory)
+        setCriticDecisions(critic)
       } catch (err) {
         setStudentDetailError((err as Error).message)
       } finally {
@@ -171,12 +224,175 @@ export const TeacherDash: React.FC = () => {
     loadStudentProgress()
   }, [selectedStudentId])
 
+  // Load the first page of session history whenever the Recent Sessions tab is
+  // opened for a student we haven't fetched yet. Subsequent pages are appended
+  // by the infinite-scroll handler on the tab content container.
+  useEffect(() => {
+    if (!selectedStudentId || activeTab !== 'sessions') return
+    if (sessionHistory.length > 0 || sessionsLoading) return
+
+    const loadFirstPage = async () => {
+      setSessionsLoading(true)
+      setSessionsError(null)
+      try {
+        const res = await api.getStudentSessions(selectedStudentId, {
+          limit: SESSIONS_PAGE_SIZE,
+          offset: 0,
+        })
+        setSessionHistory(res.sessions)
+        setSessionsTotal(res.total)
+      } catch (err) {
+        setSessionsError((err as Error).message)
+      } finally {
+        setSessionsLoading(false)
+      }
+    }
+    loadFirstPage()
+  }, [selectedStudentId, activeTab, sessionHistory.length, sessionsLoading])
+
+  const handleLoadMoreSessions = async () => {
+    if (!selectedStudentId || sessionsLoadingMore) return
+    setSessionsLoadingMore(true)
+    setSessionsError(null)
+    try {
+      const res = await api.getStudentSessions(selectedStudentId, {
+        limit: SESSIONS_PAGE_SIZE,
+        offset: sessionHistory.length,
+      })
+      setSessionHistory((prev) => [...prev, ...res.sessions])
+      setSessionsTotal(res.total)
+    } catch (err) {
+      setSessionsError((err as Error).message)
+    } finally {
+      setSessionsLoadingMore(false)
+    }
+  }
+
+  const handleAlertsScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (visibleAlerts >= alerts.length) return
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD_PX) {
+      setVisibleAlerts((c) => Math.min(c + ALERTS_STEP, alerts.length))
+    }
+  }
+
+  const handleTabScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > SCROLL_THRESHOLD_PX) return
+
+    if (activeTab === 'subjects') {
+      const total = selectedStudentProgress?.subjects.length ?? 0
+      if (visibleSubjects < total) {
+        setVisibleSubjects((c) => Math.min(c + TAB_STEP, total))
+      }
+    } else if (activeTab === 'sessions') {
+      if (!sessionsLoading && !sessionsLoadingMore && sessionHistory.length < sessionsTotal) {
+        handleLoadMoreSessions()
+      }
+    } else if (activeTab === 'concepts') {
+      const total = selectedStudentMemory?.concepts.length ?? 0
+      if (visibleConcepts < total) {
+        setVisibleConcepts((c) => Math.min(c + TAB_STEP, total))
+      }
+    } else if (activeTab === 'critic') {
+      const rejectsTotal = (criticDecisions?.decisions ?? []).filter((d) => d.verdict === 'reject').length
+      if (visibleCritic < rejectsTotal) {
+        setVisibleCritic((c) => Math.min(c + TAB_STEP, rejectsTotal))
+      }
+    }
+  }
+
+  // Sliced views feeding the rendered tab panels.
+  const visibleAlertList = useMemo(
+    () => alerts.slice(0, visibleAlerts),
+    [alerts, visibleAlerts],
+  )
+  const visibleSubjectList = useMemo(
+    () => (selectedStudentProgress?.subjects ?? []).slice(0, visibleSubjects),
+    [selectedStudentProgress, visibleSubjects],
+  )
+  // Concepts are sorted globally weakest-first before slicing so the initial
+  // window surfaces the student's biggest gaps. ConceptMastery still groups
+  // them by subject for display.
+  const visibleConceptList = useMemo(() => {
+    const all = selectedStudentMemory?.concepts ?? []
+    return [...all]
+      .sort((a, b) => a.decayed_confidence - b.decayed_confidence)
+      .slice(0, visibleConcepts)
+  }, [selectedStudentMemory, visibleConcepts])
+  const visibleCriticList = useMemo(() => {
+    const rejects = (criticDecisions?.decisions ?? []).filter((d) => d.verdict === 'reject')
+    return rejects.slice(0, visibleCritic)
+  }, [criticDecisions, visibleCritic])
+
+  const subjectsTotal = selectedStudentProgress?.subjects.length ?? 0
+  const conceptsTotal = selectedStudentMemory?.concepts.length ?? 0
+  const criticRejectsTotal = useMemo(
+    () => (criticDecisions?.decisions ?? []).filter((d) => d.verdict === 'reject').length,
+    [criticDecisions],
+  )
+
+  // While the alerts container doesn't overflow, keep loading the next batch
+  // so scrolling becomes possible. Cascades through renders until the content
+  // fills the container or we hit `alerts.length`.
+  useEffect(() => {
+    const el = alertsScrollRef.current
+    if (!el) return
+    if (visibleAlerts >= alerts.length) return
+    if (el.scrollHeight > el.clientHeight + 4) return
+    setVisibleAlerts((c) => Math.min(c + ALERTS_STEP, alerts.length))
+  }, [visibleAlerts, alerts.length])
+
+  // Same pattern for the active analytics tab. The dependency list intentionally
+  // includes the totals/visible counts so the effect re-runs after each batch
+  // and stops naturally once the container overflows.
+  useEffect(() => {
+    const el = tabContentRef.current
+    if (!el || !selectedStudentProgress || loadingStudent) return
+    if (el.scrollHeight > el.clientHeight + 4) return
+
+    if (activeTab === 'subjects') {
+      if (visibleSubjects < subjectsTotal) {
+        setVisibleSubjects((c) => Math.min(c + TAB_STEP, subjectsTotal))
+      }
+    } else if (activeTab === 'sessions') {
+      if (!sessionsLoading && !sessionsLoadingMore && sessionHistory.length < sessionsTotal) {
+        handleLoadMoreSessions()
+      }
+    } else if (activeTab === 'concepts') {
+      if (visibleConcepts < conceptsTotal) {
+        setVisibleConcepts((c) => Math.min(c + TAB_STEP, conceptsTotal))
+      }
+    } else if (activeTab === 'critic') {
+      if (visibleCritic < criticRejectsTotal) {
+        setVisibleCritic((c) => Math.min(c + TAB_STEP, criticRejectsTotal))
+      }
+    }
+    // handleLoadMoreSessions is stable enough for this effect (it reads from
+    // the latest state via its own closure check).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    activeTab,
+    selectedStudentProgress,
+    loadingStudent,
+    visibleSubjects,
+    subjectsTotal,
+    visibleConcepts,
+    conceptsTotal,
+    visibleCritic,
+    criticRejectsTotal,
+    sessionHistory.length,
+    sessionsTotal,
+    sessionsLoading,
+    sessionsLoadingMore,
+  ])
+
   const error = studentsError ?? studentDetailError ?? actionError
 
   return (
-    <div className="min-h-screen bg-gray-100 p-3 sm:p-4">
-      <div className="max-w-6xl mx-auto">
-        <header className="mb-6 sm:mb-8 flex items-start justify-between gap-3 sm:gap-4 flex-wrap">
+    <div className="h-screen bg-gray-100 overflow-hidden">
+      <div className="max-w-6xl mx-auto h-full flex flex-col p-3 sm:p-4">
+        <header className="flex-shrink-0 mb-4 sm:mb-6 flex items-start justify-between gap-3 sm:gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-1 sm:mb-2">
               🦉 Teacher Dashboard
@@ -194,133 +410,157 @@ export const TeacherDash: React.FC = () => {
           </div>
         </header>
 
-        <div className="grid gap-6 lg:grid-cols-[320px_1fr]">
-          <div className="space-y-6">
-            <div className="bg-white rounded-lg shadow p-4 sm:p-6">
-              <h2 className="text-xl font-bold text-gray-800 mb-4">📚 Student Roster</h2>
-              {studentsLoading ? (
-                <p className="text-gray-600">Loading students...</p>
-              ) : students.length === 0 ? (
-                <div className="text-center py-8">
-                  <p className="text-gray-600 text-lg">No students found.</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {students.map((student) => (
-                    <button
-                      key={student.id}
-                      onClick={() => handleSelectStudent(student.id)}
-                      className={`block w-full rounded-2xl border px-4 py-3 text-left transition ${selectedStudentId === student.id ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-white hover:border-indigo-300 hover:bg-slate-50'}`}
-                    >
-                      <p className="font-semibold text-gray-900">{student.name}</p>
-                      <p className="text-sm text-gray-500">{student.grade_level}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
+        <div className="flex-1 min-h-0 grid gap-6 lg:grid-cols-[320px_1fr]">
+          <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
+            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 max-h-[45%]">
+              <div className="px-4 sm:px-6 pt-4 sm:pt-6 pb-3 flex-shrink-0">
+                <h2 className="text-xl font-bold text-gray-800">📚 Student Roster</h2>
+              </div>
+              <div className="px-4 sm:px-6 pb-4 sm:pb-6 overflow-y-auto flex-1 min-h-0">
+                {studentsLoading ? (
+                  <p className="text-gray-600">Loading students...</p>
+                ) : students.length === 0 ? (
+                  <div className="text-center py-8">
+                    <p className="text-gray-600 text-lg">No students found.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {students.map((student) => (
+                      <button
+                        key={student.id}
+                        onClick={() => handleSelectStudent(student.id)}
+                        className={`block w-full rounded-2xl border px-4 py-3 text-left transition ${selectedStudentId === student.id ? 'border-indigo-500 bg-indigo-50' : 'border-slate-200 bg-white hover:border-indigo-300 hover:bg-slate-50'}`}
+                      >
+                        <p className="font-semibold text-gray-900">{student.name}</p>
+                        <p className="text-sm text-gray-500">{student.grade_level}</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
-            <div className="bg-white rounded-lg shadow p-4 sm:p-6">
-              <h2 className="text-xl font-bold text-gray-800 mb-4">⚠️ Alerts</h2>
-              {alertsPoll.isLoading ? (
-                <p className="text-gray-600">Loading alerts...</p>
-              ) : alerts.length === 0 ? (
-                <p className="text-gray-600">No active alerts right now.</p>
-              ) : (
-                <div className="space-y-4">
-                  {alerts.map((alert) => {
-                    const badge = SEVERITY_BADGE[alert.severity]
-                    const busy = !!actionInFlight[alert.id]
-                    const stripeClass =
-                      alert.severity === 'high' ? 'bg-red-500'
-                      : alert.severity === 'medium' ? 'bg-amber-500'
-                      : 'bg-sky-500'
-                    return (
-                      <div
-                        key={alert.id}
-                        className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-shadow"
-                      >
-                        <div aria-hidden="true" className={`absolute left-0 top-0 bottom-0 w-1 ${stripeClass}`} />
-                        <div className="p-4 sm:p-5 pl-5 sm:pl-6 space-y-3">
-                          <div className="flex items-start justify-between gap-3 flex-wrap">
-                            <p className="font-semibold text-slate-900 break-words min-w-0 flex-1">
-                              {alert.student_name}
-                            </p>
-                            <span
-                              className={`text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full border ${badge.classes} whitespace-nowrap`}
-                              title={`${REASON_LABEL[alert.reason_kind]}: ${alert.reason_text}`}
-                            >
-                              {badge.label}
-                            </span>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
-                              {REASON_LABEL[alert.reason_kind]}
-                            </span>
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
-                              Hint {alert.hint_level}/3
-                            </span>
-                            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
-                              {alert.fails_at_level} {alert.fails_at_level === 1 ? 'fail' : 'fails'}
-                            </span>
-                            {alert.notification_status === 'failed' && (
-                              <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">
-                                <span aria-hidden="true">⚠</span> Delivery failed
-                              </span>
-                            )}
-                          </div>
-
-                          <blockquote
-                            className="border-l-2 border-slate-200 pl-3 text-sm italic text-slate-600 line-clamp-2 break-words"
-                            title={alert.question}
+            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 flex-1">
+              <div className="px-4 sm:px-6 pt-4 sm:pt-6 pb-3 flex-shrink-0 flex items-center justify-between gap-2">
+                <h2 className="text-xl font-bold text-gray-800">⚠️ Alerts</h2>
+                {alerts.length > 0 && (
+                  <span className="text-xs text-slate-500">
+                    {Math.min(visibleAlerts, alerts.length)} / {alerts.length}
+                  </span>
+                )}
+              </div>
+              <div
+                ref={alertsScrollRef}
+                className="px-4 sm:px-6 pb-4 sm:pb-6 overflow-y-auto flex-1 min-h-0"
+                onScroll={handleAlertsScroll}
+              >
+                {alertsPoll.isLoading ? (
+                  <p className="text-gray-600">Loading alerts...</p>
+                ) : alerts.length === 0 ? (
+                  <p className="text-gray-600">No active alerts right now.</p>
+                ) : (
+                  <>
+                    <div className="space-y-4">
+                      {visibleAlertList.map((alert) => {
+                        const badge = SEVERITY_BADGE[alert.severity]
+                        const busy = !!actionInFlight[alert.id]
+                        const stripeClass =
+                          alert.severity === 'high' ? 'bg-red-500'
+                          : alert.severity === 'medium' ? 'bg-amber-500'
+                          : 'bg-sky-500'
+                        return (
+                          <div
+                            key={alert.id}
+                            className="group relative overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-shadow"
                           >
-                            {alert.question}
-                          </blockquote>
-
-                          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                            <span className="text-xs text-slate-500">
-                              {alert.acknowledged_at ? (
-                                <>
-                                  Acknowledged by{' '}
-                                  <span className="font-medium text-slate-700">
-                                    {alert.acknowledged_by_name ?? 'a teacher'}
-                                  </span>
-                                </>
-                              ) : (
-                                'Not yet acknowledged'
-                              )}
-                            </span>
-                            <div className="flex gap-2">
-                              {!alert.acknowledged_at && (
-                                <button
-                                  disabled={busy}
-                                  onClick={() => handleAcknowledge(alert)}
-                                  className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 transition"
+                            <div aria-hidden="true" className={`absolute left-0 top-0 bottom-0 w-1 ${stripeClass}`} />
+                            <div className="p-4 sm:p-5 pl-5 sm:pl-6 space-y-3">
+                              <div className="flex items-start justify-between gap-3 flex-wrap">
+                                <p className="font-semibold text-slate-900 break-words min-w-0 flex-1">
+                                  {alert.student_name}
+                                </p>
+                                <span
+                                  className={`text-[11px] font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full border ${badge.classes} whitespace-nowrap`}
+                                  title={`${REASON_LABEL[alert.reason_kind]}: ${alert.reason_text}`}
                                 >
-                                  {busy ? '…' : 'Acknowledge'}
-                                </button>
-                              )}
-                              <button
-                                disabled={busy}
-                                onClick={() => handleResolve(alert)}
-                                className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 transition"
+                                  {badge.label}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                                  {REASON_LABEL[alert.reason_kind]}
+                                </span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                                  Hint {alert.hint_level}/3
+                                </span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                                  {alert.fails_at_level} {alert.fails_at_level === 1 ? 'fail' : 'fails'}
+                                </span>
+                                {alert.notification_status === 'failed' && (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">
+                                    <span aria-hidden="true">⚠</span> Delivery failed
+                                  </span>
+                                )}
+                              </div>
+
+                              <blockquote
+                                className="border-l-2 border-slate-200 pl-3 text-sm italic text-slate-600 line-clamp-2 break-words"
+                                title={alert.question}
                               >
-                                {busy ? '…' : 'Resolve'}
-                              </button>
+                                {alert.question}
+                              </blockquote>
+
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                                <span className="text-xs text-slate-500">
+                                  {alert.acknowledged_at ? (
+                                    <>
+                                      Acknowledged by{' '}
+                                      <span className="font-medium text-slate-700">
+                                        {alert.acknowledged_by_name ?? 'a teacher'}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    'Not yet acknowledged'
+                                  )}
+                                </span>
+                                <div className="flex gap-2">
+                                  {!alert.acknowledged_at && (
+                                    <button
+                                      disabled={busy}
+                                      onClick={() => handleAcknowledge(alert)}
+                                      className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 transition"
+                                    >
+                                      {busy ? '…' : 'Acknowledge'}
+                                    </button>
+                                  )}
+                                  <button
+                                    disabled={busy}
+                                    onClick={() => handleResolve(alert)}
+                                    className="inline-flex items-center gap-1 text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 transition"
+                                  >
+                                    {busy ? '…' : 'Resolve'}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
+                        )
+                      })}
+                    </div>
+                    {visibleAlerts < alerts.length && (
+                      <p className="mt-4 text-center text-xs text-slate-400">
+                        Scroll for more ({alerts.length - visibleAlerts} remaining)
+                      </p>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="space-y-6">
-            <div className="bg-white rounded-lg shadow p-4 sm:p-6">
+          <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
+            <div className="bg-white rounded-lg shadow p-4 sm:p-6 flex-shrink-0">
               <h2 className="text-xl font-bold text-gray-800 mb-4">📊 Class Overview</h2>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
                 <div className="text-center rounded-2xl bg-slate-50 p-4">
@@ -341,69 +581,180 @@ export const TeacherDash: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg shadow p-4 sm:p-6">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                <div className="min-w-0">
-                  <h2 className="text-xl font-bold text-gray-800">Student Analytics</h2>
-                  <p className="text-sm text-gray-500">View details for the selected student.</p>
+            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 flex-1">
+              <div className="px-4 sm:px-6 pt-4 sm:pt-6 flex-shrink-0">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                  <div className="min-w-0">
+                    <h2 className="text-xl font-bold text-gray-800">Student Analytics</h2>
+                    <p className="text-sm text-gray-500">View details for the selected student.</p>
+                  </div>
+                  <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700 whitespace-nowrap">
+                    {selectedStudentId ? 'Student selected' : 'Pick a student'}
+                  </span>
                 </div>
-                <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700 whitespace-nowrap">
-                  {selectedStudentId ? 'Student selected' : 'Pick a student'}
-                </span>
+
+                {selectedStudentProgress && !loadingStudent && (
+                  <div
+                    role="tablist"
+                    aria-label="Student analytics tabs"
+                    className="flex flex-wrap gap-1 border-b border-slate-200"
+                  >
+                    {TABS.map((tab) => {
+                      const isActive = activeTab === tab.key
+                      return (
+                        <button
+                          key={tab.key}
+                          role="tab"
+                          aria-selected={isActive}
+                          aria-controls={`tab-panel-${tab.key}`}
+                          id={`tab-${tab.key}`}
+                          onClick={() => setActiveTab(tab.key)}
+                          className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px border-b-2 ${
+                            isActive
+                              ? 'border-indigo-600 text-indigo-700 bg-indigo-50/60'
+                              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                          }`}
+                        >
+                          {tab.label}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
 
-              {loadingStudent ? (
-                <p className="text-gray-600">Loading student progress...</p>
-              ) : selectedStudentProgress ? (
-                <div className="space-y-5">
-                  <div>
-                    <h3 className="text-sm uppercase tracking-wide text-slate-500">Subjects</h3>
-                    <div className="mt-3 space-y-3">
-                      {selectedStudentProgress.subjects.map((subject) => (
-                        <div key={subject.name} className="rounded-2xl bg-slate-50 p-4">
-                          <div className="flex items-center justify-between gap-4">
-                            <p className="font-semibold text-slate-900">{subject.name}</p>
-                            <p className="text-sm text-slate-600">{subject.sessions} sessions</p>
-                          </div>
-                          <div className="mt-2 h-2 rounded-full bg-white">
-                            <div className="h-full rounded-full bg-indigo-600" style={{ width: `${subject.success_rate * 100}%` }} />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+              <div
+                ref={tabContentRef}
+                className="px-4 sm:px-6 py-4 sm:py-5 overflow-y-auto flex-1 min-h-0"
+                onScroll={handleTabScroll}
+              >
+                {loadingStudent ? (
+                  <p className="text-gray-600">Loading student progress...</p>
+                ) : !selectedStudentProgress ? (
+                  <p className="text-gray-600">Select a student to see their analytics.</p>
+                ) : (
+                  <>
+                    {activeTab === 'subjects' && (
+                      <div
+                        role="tabpanel"
+                        id="tab-panel-subjects"
+                        aria-labelledby="tab-subjects"
+                      >
+                        {subjectsTotal === 0 ? (
+                          <p className="text-sm text-slate-500">
+                            No subject activity yet for this student.
+                          </p>
+                        ) : (
+                          <>
+                            <div className="space-y-3">
+                              {visibleSubjectList.map((subject) => (
+                                <div key={subject.name} className="rounded-2xl bg-slate-50 p-4">
+                                  <div className="flex items-center justify-between gap-4">
+                                    <p className="font-semibold text-slate-900">{subject.name}</p>
+                                    <p className="text-sm text-slate-600">{subject.sessions} sessions</p>
+                                  </div>
+                                  <div className="mt-2 h-2 rounded-full bg-white">
+                                    <div className="h-full rounded-full bg-indigo-600" style={{ width: `${subject.success_rate * 100}%` }} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            {visibleSubjectList.length < subjectsTotal && (
+                              <p className="mt-4 text-center text-xs text-slate-400">
+                                Scroll for more ({subjectsTotal - visibleSubjectList.length} remaining)
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
 
-                  <div>
-                    <h3 className="text-sm uppercase tracking-wide text-slate-500">Recent Sessions</h3>
-                    <div className="mt-3 space-y-3">
-                      {selectedStudentProgress.recent_sessions.map((session) => (
-                        <div key={session.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-                          <p className="font-semibold text-slate-900 break-words">{session.question}</p>
-                          <p className="text-sm text-slate-500">{session.subject} • {session.resolved ? 'Resolved' : 'Open'}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                    {activeTab === 'sessions' && (
+                      <div
+                        role="tabpanel"
+                        id="tab-panel-sessions"
+                        aria-labelledby="tab-sessions"
+                      >
+                        {sessionsLoading && sessionHistory.length === 0 ? (
+                          <p className="text-gray-600">Loading sessions…</p>
+                        ) : sessionHistory.length === 0 ? (
+                          <p className="text-sm text-slate-500">
+                            No sessions recorded for this student yet.
+                          </p>
+                        ) : (
+                          <>
+                            <div className="space-y-3">
+                              {sessionHistory.map((session) => (
+                                <div key={session.id} className="rounded-2xl border border-slate-200 bg-white p-4">
+                                  <p className="font-semibold text-slate-900 break-words">{session.question}</p>
+                                  <p className="text-sm text-slate-500">
+                                    {session.subject} • {session.resolved ? 'Resolved' : 'Open'} • {new Date(session.started_at).toLocaleString()}
+                                  </p>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="mt-4 text-center text-xs text-slate-400">
+                              {sessionsLoadingMore
+                                ? 'Loading more…'
+                                : sessionHistory.length < sessionsTotal
+                                  ? `Scroll for more (${sessionsTotal - sessionHistory.length} remaining)`
+                                  : `Showing all ${sessionsTotal} sessions`}
+                            </div>
+                            {sessionsError && (
+                              <p className="mt-2 text-center text-xs text-red-700">{sessionsError}</p>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
 
-                  <div>
-                    <h3 className="text-sm uppercase tracking-wide text-slate-500">Concept Mastery</h3>
-                    <div className="mt-3">
-                      <ConceptMastery
-                        concepts={selectedStudentMemory?.concepts ?? []}
-                        loading={loadingStudent}
-                      />
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-gray-600">Select a student to see their analytics.</p>
-              )}
+                    {activeTab === 'concepts' && (
+                      <div
+                        role="tabpanel"
+                        id="tab-panel-concepts"
+                        aria-labelledby="tab-concepts"
+                      >
+                        <ConceptMastery
+                          concepts={visibleConceptList}
+                          loading={loadingStudent}
+                        />
+                        {visibleConceptList.length < conceptsTotal && (
+                          <p className="mt-4 text-center text-xs text-slate-400">
+                            Scroll for more ({conceptsTotal - visibleConceptList.length} remaining)
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {activeTab === 'critic' && (
+                      <div
+                        role="tabpanel"
+                        id="tab-panel-critic"
+                        aria-labelledby="tab-critic"
+                      >
+                        <p className="text-xs text-slate-500 mb-3">
+                          Hints the Socratic critic rejected and regenerated. Click a row to inspect.
+                        </p>
+                        <CriticDecisionsPanel
+                          decisions={visibleCriticList}
+                          loading={loadingStudent}
+                        />
+                        {visibleCriticList.length < criticRejectsTotal && (
+                          <p className="mt-4 text-center text-xs text-slate-400">
+                            Scroll for more ({criticRejectsTotal - visibleCriticList.length} remaining)
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
           </div>
         </div>
 
         {error && (
-          <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          <div className="flex-shrink-0 mt-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
             {error.includes("Authentication token missing")
               ? "Your session expired or the login token is missing. Please log out and sign in again."
               : error}

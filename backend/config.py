@@ -75,10 +75,31 @@ class Settings(BaseSettings):
     memory_max_concepts_per_session: int = 3
     memory_consolidation_timeout_seconds: int = 10
 
+    # Socratic critic — adversarial second-pass judge on every generated hint.
+    # When disabled, hints flow through unchanged (no extra LLM call, no DB row).
+    critic_enabled: bool = True
+    critic_max_retries: int = 1
+    critic_timeout_seconds: int = 8
+    # Fail open: if the critic LLM errors / times out / returns malformed JSON,
+    # we deliver the original hint rather than blocking the student.
+    critic_fail_open: bool = True
+    # Empty string → fall back to azure_openai_deployment. Set this to point
+    # at a cheaper / faster deployment (Haiku-class) once available.
+    azure_openai_critic_deployment: str = ""
+
     # Inactivity scheduler
     inactivity_scheduler_enabled: bool = True
     inactivity_scan_interval_seconds: int = 60
     inactivity_max_session_age_hours: int = 24
+
+    # Problem generator + verifier (closed-loop practice agent).
+    # Killswitch disables /api/practice/generate; the read + attempt paths
+    # remain available so existing rows stay usable.
+    practice_generator_enabled: bool = True
+    practice_max_generation_retries: int = 2
+    practice_generator_timeout_seconds: int = 12
+    practice_verifier_timeout_seconds: int = 8
+    practice_history_limit: int = 20
 
     # Travily learning resource API
     travily_api_key: str = ""

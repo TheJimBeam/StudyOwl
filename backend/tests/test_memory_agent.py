@@ -219,6 +219,66 @@ async def test_get_student_memory_orders_weakest_first():
 
 
 @pytest.mark.asyncio
+async def test_bump_concept_after_practice_inserts_new_row_on_correct():
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    concept_result = MagicMock()
+    concept_result.scalar_one_or_none = MagicMock(return_value=None)
+    db.execute = AsyncMock(return_value=concept_result)
+
+    row = await memory_agent.bump_concept_after_practice(
+        db=db, student_id=uuid4(), concept="mean-vs-median",
+        subject="math", correct=True, label="Mean vs. Median",
+    )
+    assert row is not None
+    db.add.assert_called_once()
+    # signal=0.9 on first-touch → status mastered
+    assert row.confidence == pytest.approx(0.9, abs=1e-3)
+    assert row.status == "mastered"
+    assert row.correct_count == 1
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bump_concept_after_practice_blends_with_existing():
+    db = AsyncMock()
+    db.add = MagicMock()
+    db.commit = AsyncMock()
+    existing = MagicMock()
+    existing.confidence = 0.5
+    existing.last_seen = datetime.now(timezone.utc)
+    existing.attempts_count = 3
+    existing.correct_count = 1
+    existing.label = "Mean vs. Median"
+    concept_result = MagicMock()
+    concept_result.scalar_one_or_none = MagicMock(return_value=existing)
+    db.execute = AsyncMock(return_value=concept_result)
+
+    await memory_agent.bump_concept_after_practice(
+        db=db, student_id=uuid4(), concept="mean-vs-median",
+        subject="math", correct=False, label=None,
+    )
+    # wrong attempt: signal=0.2, prior_decayed=0.5 → blend = 0.6*0.2 + 0.4*0.5 = 0.32
+    assert existing.confidence == pytest.approx(0.32, abs=1e-3)
+    assert existing.status == "struggling"
+    assert existing.attempts_count == 4
+    assert existing.correct_count == 1  # unchanged for a wrong attempt
+    db.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bump_concept_after_practice_noop_when_disabled():
+    db = AsyncMock()
+    with patch.object(settings, "memory_consolidation_enabled", False):
+        out = await memory_agent.bump_concept_after_practice(
+            db=db, student_id=uuid4(), concept="x", subject="math", correct=True,
+        )
+    assert out is None
+    db.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_get_review_concepts_filters_by_threshold():
     db = AsyncMock()
     rows = [
