@@ -24,6 +24,7 @@ from models.alert import (
 from . import hint_engine
 from . import answer_verifier
 from . import alert_service
+from . import memory_agent
 from . import subject_router
 from . import travily_service
 
@@ -57,11 +58,16 @@ async def start_session(
     await db.commit()
     await db.refresh(session)
 
+    prior_concepts = await memory_agent.get_review_concepts(
+        db, student_id, subject=subject,
+    )
+
     first_hint = await hint_engine.get_hint(
         question=question,
         subject=subject,
         level=1,
         previous_attempts=[],
+        prior_concepts=prior_concepts,
     )
 
     return session, first_hint
@@ -134,6 +140,7 @@ async def process_attempt(
         session.resolved = True
         session.resolved_at = datetime.now(timezone.utc)
         await db.commit()
+        await memory_agent.consolidate_session(db, session)
         return {"status": "correct", "message": "Brilliant work! You got it!"}
 
     # Wrong answer — if the student has already seen all three hints, reveal the direct answer.
@@ -144,6 +151,7 @@ async def process_attempt(
         session.resolved = True
         session.resolved_at = datetime.now(timezone.utc)
         await db.commit()
+        await memory_agent.consolidate_session(db, session)
         return {
             "status": "wrong",
             "hint": None,
@@ -178,6 +186,9 @@ async def process_attempt(
             session.fails_at_level = 0
         else:
             session.fails_at_level += 1
+        prior_concepts = await memory_agent.get_review_concepts(
+            db, session.student_id, subject=session.subject,
+        )
         hint = await hint_engine.get_hint(
             question=session.question,
             subject=session.subject,
@@ -185,6 +196,7 @@ async def process_attempt(
             previous_attempts=previous_attempts + [attempt_text],
             previous_hints=previous_hints,
             previous_clarifications=previous_clarifications,
+            prior_concepts=prior_concepts,
         )
         learning_resources = []
 
@@ -253,6 +265,10 @@ async def start_session_stream(
         "hint_level": session.hint_level,
     }
 
+    prior_concepts = await memory_agent.get_review_concepts(
+        db, student_id, subject=subject,
+    )
+
     assembled: list[str] = []
     try:
         async for chunk in hint_engine.stream_hint(
@@ -260,6 +276,7 @@ async def start_session_stream(
             subject=subject,
             level=1,
             previous_attempts=[],
+            prior_concepts=prior_concepts,
         ):
             assembled.append(chunk)
             yield {"type": "chunk", "text": chunk}
@@ -354,6 +371,7 @@ async def process_attempt_stream(
         session.resolved = True
         session.resolved_at = datetime.now(timezone.utc)
         await db.commit()
+        await memory_agent.consolidate_session(db, session)
         yield {
             "type": "verdict",
             "status": "correct",
@@ -375,6 +393,7 @@ async def process_attempt_stream(
         session.resolved = True
         session.resolved_at = datetime.now(timezone.utc)
         await db.commit()
+        await memory_agent.consolidate_session(db, session)
         yield {
             "type": "verdict",
             "status": "wrong",
@@ -443,6 +462,10 @@ async def process_attempt_stream(
         "learning_resources": [],
     }
 
+    prior_concepts = await memory_agent.get_review_concepts(
+        db, session.student_id, subject=session.subject,
+    )
+
     assembled: list[str] = []
     try:
         async for chunk in hint_engine.stream_hint(
@@ -452,6 +475,7 @@ async def process_attempt_stream(
             previous_attempts=previous_attempts + [attempt_text],
             previous_hints=previous_hints,
             previous_clarifications=previous_clarifications,
+            prior_concepts=prior_concepts,
         ):
             assembled.append(chunk)
             yield {"type": "chunk", "text": chunk}

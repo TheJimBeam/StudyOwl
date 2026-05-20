@@ -2,11 +2,13 @@ import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '../api/studyowl'
 import type {
+  StudentMemoryResponse,
   TeacherAlert,
   TeacherAlertsResponse,
   TeacherMetricsResponse,
 } from '../api/studyowl'
 import { usePolling } from '../hooks/usePolling'
+import { ConceptMastery } from '../components/ConceptMastery'
 
 const SEVERITY_BADGE: Record<TeacherAlert['severity'], { label: string; classes: string }> = {
   high: { label: '🔴 HIGH', classes: 'bg-red-100 text-red-800 border-red-300' },
@@ -47,6 +49,7 @@ export const TeacherDash: React.FC = () => {
   const [studentsLoading, setStudentsLoading] = useState(true)
   const [studentsError, setStudentsError] = useState<string | null>(null)
   const [selectedStudentProgress, setSelectedStudentProgress] = useState<StudentProgress | null>(null)
+  const [selectedStudentMemory, setSelectedStudentMemory] = useState<StudentMemoryResponse | null>(null)
   const [loadingStudent, setLoadingStudent] = useState(false)
   const [studentDetailError, setStudentDetailError] = useState<string | null>(null)
   // In-flight ack/resolve to prevent double-clicks. Keyed by alert ID.
@@ -144,6 +147,7 @@ export const TeacherDash: React.FC = () => {
   useEffect(() => {
     if (!selectedStudentId) {
       setSelectedStudentProgress(null)
+      setSelectedStudentMemory(null)
       return
     }
 
@@ -151,8 +155,12 @@ export const TeacherDash: React.FC = () => {
       setLoadingStudent(true)
       setStudentDetailError(null)
       try {
-        const progress = await api.getStudentProgress(selectedStudentId)
+        const [progress, memory] = await Promise.all([
+          api.getStudentProgress(selectedStudentId),
+          api.getStudentMemory(selectedStudentId).catch(() => null),
+        ])
         setSelectedStudentProgress(progress)
+        setSelectedStudentMemory(memory)
       } catch (err) {
         setStudentDetailError((err as Error).message)
       } finally {
@@ -374,6 +382,16 @@ export const TeacherDash: React.FC = () => {
                           <p className="text-sm text-slate-500">{session.subject} • {session.resolved ? 'Resolved' : 'Open'}</p>
                         </div>
                       ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-sm uppercase tracking-wide text-slate-500">Concept Mastery</h3>
+                    <div className="mt-3">
+                      <ConceptMastery
+                        concepts={selectedStudentMemory?.concepts ?? []}
+                        loading={loadingStudent}
+                      />
                     </div>
                   </div>
                 </div>

@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # Clarifications — cap per hint level. Resets when hint level advances.
     clarifications_per_level_limit: int = 3
 
+    # Knowledge-graph memory
+    memory_consolidation_enabled: bool = True
+    memory_decay_half_life_days: int = 14
+    memory_review_threshold: float = 0.4
+    memory_max_concepts_per_session: int = 3
+    memory_consolidation_timeout_seconds: int = 10
+
     # Inactivity scheduler
     inactivity_scheduler_enabled: bool = True
     inactivity_scan_interval_seconds: int = 60

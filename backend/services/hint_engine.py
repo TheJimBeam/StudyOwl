@@ -12,6 +12,7 @@ Hint levels:
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 
 from openai import AzureOpenAI
 from config import settings
@@ -37,7 +38,45 @@ Rules:
 - Maximum 3 sentences per response.
 - Always end with exactly one short, genuine encouraging sentence.
 - If the student expresses frustration or distress, acknowledge it warmly before the hint.
+- If a "Knowledge graph" section is provided in the user message, lead with a probing question that surfaces one of those weaknesses — but only if it's relevant to the current question. Otherwise ignore it.
 """
+
+
+def _render_prior_concepts(prior_concepts: list[dict] | None) -> str | None:
+    """
+    Render the knowledge-graph context block for the hint prompt. Returns
+    None when there are no weak concepts to surface so the caller can skip
+    the section entirely.
+    """
+    if not prior_concepts:
+        return None
+    now = datetime.now(timezone.utc)
+    lines = []
+    for c in prior_concepts:
+        last_seen_raw = c.get("last_seen")
+        days_ago_str = ""
+        if last_seen_raw:
+            try:
+                last_seen = datetime.fromisoformat(last_seen_raw)
+                if last_seen.tzinfo is None:
+                    last_seen = last_seen.replace(tzinfo=timezone.utc)
+                days = max(0, int((now - last_seen).total_seconds() // 86400))
+                days_ago_str = f"last seen {days}d ago, "
+            except (TypeError, ValueError):
+                pass
+        decayed = c.get("decayed_confidence", c.get("confidence", 0.0))
+        status = c.get("status", "struggling")
+        label = c.get("label") or c.get("concept", "")
+        lines.append(
+            f"- {label} ({days_ago_str}confidence {decayed:.2f}) — {status}"
+        )
+    rendered = "\n".join(lines)
+    return (
+        "Knowledge graph — this student has shown weakness recently:\n"
+        f"{rendered}\n\n"
+        "If your hint can probe one of these weaknesses, prioritise that — "
+        "but never sacrifice fit to the current question."
+    )
 
 
 def _build_hint_user_message(
@@ -45,6 +84,7 @@ def _build_hint_user_message(
     previous_hints: list[str],
     previous_attempts: list[str],
     previous_clarifications: list[tuple[str, str]] | None = None,
+    prior_concepts: list[dict] | None = None,
 ) -> str:
     """
     Build the user-message body for a hint request, including the conversation
@@ -53,6 +93,8 @@ def _build_hint_user_message(
 
     `previous_clarifications` is a list of (student_question, ai_clarification)
     pairs — passed only by the clarify path (PR 8).
+    `prior_concepts` is the student's weakest knowledge-graph concepts, fed in
+    so the LLM can probe known weaknesses (see memory_agent.get_review_concepts).
     """
     limit = settings.conversation_history_limit
     parts = [f"Question: {question}"]
@@ -89,6 +131,10 @@ def _build_hint_user_message(
     else:
         parts.append("Student's previous wrong attempts: None yet.")
 
+    kg_section = _render_prior_concepts(prior_concepts)
+    if kg_section:
+        parts.append(kg_section)
+
     return "\n\n".join(parts)
 
 
@@ -99,6 +145,7 @@ async def get_hint(
     previous_attempts: list[str],
     previous_hints: list[str] | None = None,
     previous_clarifications: list[tuple[str, str]] | None = None,
+    prior_concepts: list[dict] | None = None,
 ) -> str:
     """
     Generate a Socratic hint for the given question at the specified hint level.
@@ -113,6 +160,8 @@ async def get_hint(
         previous_clarifications: (student_question, ai_clarification) pairs from
             the clarify path. Threaded into the prompt so the AI is consistent
             across hints and clarifications.
+        prior_concepts: Weak concepts from the knowledge-graph memory, used to
+            probe known weaknesses across sessions.
 
     Returns:
         A hint string from AzureOpenAI, appropriate to the hint level.
@@ -122,6 +171,7 @@ async def get_hint(
         previous_hints=previous_hints or [],
         previous_attempts=previous_attempts,
         previous_clarifications=previous_clarifications,
+        prior_concepts=prior_concepts,
     )
 
     # Wrap sync OpenAI call in thread pool to avoid blocking event loop
@@ -164,6 +214,7 @@ async def clarify(
     previous_hints: list[str],
     previous_attempts: list[str],
     previous_clarifications: list[tuple[str, str]],
+    prior_concepts: list[dict] | None = None,
 ) -> str:
     """
     Answer a student's clarifying question about the current hint without
@@ -174,6 +225,7 @@ async def clarify(
         previous_hints=previous_hints,
         previous_attempts=previous_attempts,
         previous_clarifications=previous_clarifications,
+        prior_concepts=prior_concepts,
     )
     user_message = (
         f"{history}\n\n"
@@ -204,6 +256,7 @@ async def stream_hint(
     previous_attempts: list[str],
     previous_hints: list[str] | None = None,
     previous_clarifications: list[tuple[str, str]] | None = None,
+    prior_concepts: list[dict] | None = None,
 ) -> AsyncIterator[str]:
     """
     Stream a hint as text chunks (token-ish granularity from Azure OpenAI).
@@ -223,6 +276,7 @@ async def stream_hint(
         previous_hints=previous_hints or [],
         previous_attempts=previous_attempts,
         previous_clarifications=previous_clarifications,
+        prior_concepts=prior_concepts,
     )
 
     queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=64)

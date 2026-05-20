@@ -69,3 +69,34 @@ def test_user_message_includes_clarifications_when_present():
     assert "what does subtract mean?" in msg
     assert "Subtracting takes a number away" in msg
     assert "Clarifying exchanges" in msg
+
+
+def test_user_message_includes_knowledge_graph_when_prior_concepts_present():
+    msg = _build_hint_user_message(
+        question="Find the median of 1, 5, 9",
+        previous_hints=[],
+        previous_attempts=[],
+        prior_concepts=[
+            {
+                "concept": "mean-vs-median",
+                "label": "Mean vs. Median",
+                "decayed_confidence": 0.32,
+                "status": "struggling",
+                "last_seen": "2025-04-01T00:00:00+00:00",
+            }
+        ],
+    )
+    assert "Knowledge graph" in msg
+    assert "Mean vs. Median" in msg
+    assert "struggling" in msg
+    assert "0.32" in msg
+
+
+def test_user_message_omits_knowledge_graph_section_when_no_prior_concepts():
+    msg = _build_hint_user_message(
+        question="q",
+        previous_hints=[],
+        previous_attempts=[],
+        prior_concepts=[],
+    )
+    assert "Knowledge graph" not in msg

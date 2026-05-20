@@ -176,6 +176,25 @@ export interface StudentSessionHistoryResponse {
   offset: number;
 }
 
+export type ConceptStatus = "mastered" | "partial" | "struggling";
+
+export interface ConceptMemoryItem {
+  concept: string;
+  label: string;
+  subject: string;
+  status: ConceptStatus;
+  confidence: number;
+  decayed_confidence: number;
+  last_seen: string;
+  attempts: number;
+  correct: number;
+}
+
+export interface StudentMemoryResponse {
+  concepts: ConceptMemoryItem[];
+  generated_at: string;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -312,6 +331,12 @@ export const api = {
   /** Fetch a specific student's progress. */
   getStudentProgress: (studentId: string) =>
     apiFetch<StudentProgress>(`/api/student/${studentId}/progress`),
+
+  /** Fetch a student's knowledge-graph memory (concepts + decayed confidence). */
+  getStudentMemory: (studentId: string, subject?: string) =>
+    apiFetch<StudentMemoryResponse>(
+      `/api/student/${studentId}/memory${subject ? `?subject=${encodeURIComponent(subject)}` : ""}`,
+    ),
 
   /** Log out by removing token. */
   logout: () => {

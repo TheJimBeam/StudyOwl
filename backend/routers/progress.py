@@ -2,6 +2,8 @@
 Progress router — retrieve student progress and analytics.
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
@@ -12,6 +14,7 @@ from db import get_db
 from models.student import Student
 from models.session import Session
 from routers.auth import get_current_student
+from services import memory_agent
 
 router = APIRouter()
 
@@ -51,6 +54,23 @@ class StudentSessionHistoryResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ConceptMemoryItem(BaseModel):
+    concept: str
+    label: str
+    subject: str
+    status: str  # mastered | partial | struggling (decayed)
+    confidence: float
+    decayed_confidence: float
+    last_seen: str
+    attempts: int
+    correct: int
+
+
+class StudentMemoryResponse(BaseModel):
+    concepts: list[ConceptMemoryItem]
+    generated_at: str
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -171,6 +191,37 @@ async def get_student_sessions(
         total=int(total),
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get("/{student_id}/memory", response_model=StudentMemoryResponse)
+async def get_student_memory(
+    student_id: str,
+    subject: str | None = Query(None),
+    current_student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return the knowledge-graph memory rows for a student, with decayed
+    confidence and derived status computed at read time.
+
+    Students may view their own memory; teachers may view any student's.
+    """
+    try:
+        student_uuid = UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student ID")
+
+    if current_student.role == "student":
+        if str(current_student.id) != student_id:
+            raise HTTPException(status_code=403, detail="Students can only view their own memory")
+    elif current_student.role != "teacher":
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    concepts = await memory_agent.get_student_memory(db, student_uuid, subject=subject)
+    return StudentMemoryResponse(
+        concepts=[ConceptMemoryItem(**c) for c in concepts],
+        generated_at=datetime.now(timezone.utc).isoformat(),
     )
 
 

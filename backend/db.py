@@ -33,7 +33,7 @@ SessionLocal = async_sessionmaker(
 async def init_db() -> None:
     """Initialize database tables and set up connection pool."""
     # Import models here to ensure they're registered with Base
-    from models import Student, Session, Attempt, Alert  # noqa: F401
+    from models import Student, Session, Attempt, Alert, ConceptMemory  # noqa: F401
 
     async with engine.begin() as conn:
         # Create all tables from models (no-op for tables that already exist).
