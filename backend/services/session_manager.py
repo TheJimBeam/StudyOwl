@@ -22,6 +22,7 @@ from models.alert import (
     SEVERITY_FOR_REASON,
 )
 from . import hint_engine
+from . import hint_pipeline
 from . import answer_verifier
 from . import alert_service
 from . import memory_agent
@@ -62,13 +63,19 @@ async def start_session(
         db, student_id, subject=subject,
     )
 
-    first_hint = await hint_engine.get_hint(
+    first_hint = await hint_pipeline.get_critiqued_hint(
+        db,
+        session_id=session.id,
+        student_id=student_id,
         question=question,
         subject=subject,
         level=1,
         previous_attempts=[],
         prior_concepts=prior_concepts,
     )
+    # Critic decisions are staged via db.add — commit so the row lands before
+    # the response returns. Cheap (single insert).
+    await db.commit()
 
     return session, first_hint
 
@@ -189,7 +196,10 @@ async def process_attempt(
         prior_concepts = await memory_agent.get_review_concepts(
             db, session.student_id, subject=session.subject,
         )
-        hint = await hint_engine.get_hint(
+        hint = await hint_pipeline.get_critiqued_hint(
+            db,
+            session_id=session.id,
+            student_id=session.student_id,
             question=session.question,
             subject=session.subject,
             level=session.hint_level,
@@ -197,6 +207,7 @@ async def process_attempt(
             previous_hints=previous_hints,
             previous_clarifications=previous_clarifications,
             prior_concepts=prior_concepts,
+            last_wrong_attempt=attempt_text,
         )
         learning_resources = []
 
@@ -271,7 +282,10 @@ async def start_session_stream(
 
     assembled: list[str] = []
     try:
-        async for chunk in hint_engine.stream_hint(
+        async for chunk in hint_pipeline.stream_critiqued_hint(
+            db,
+            session_id=session.id,
+            student_id=student_id,
             question=question,
             subject=subject,
             level=1,
@@ -468,7 +482,10 @@ async def process_attempt_stream(
 
     assembled: list[str] = []
     try:
-        async for chunk in hint_engine.stream_hint(
+        async for chunk in hint_pipeline.stream_critiqued_hint(
+            db,
+            session_id=session.id,
+            student_id=session.student_id,
             question=session.question,
             subject=session.subject,
             level=session.hint_level,
@@ -476,6 +493,7 @@ async def process_attempt_stream(
             previous_hints=previous_hints,
             previous_clarifications=previous_clarifications,
             prior_concepts=prior_concepts,
+            last_wrong_attempt=attempt_text,
         ):
             assembled.append(chunk)
             yield {"type": "chunk", "text": chunk}

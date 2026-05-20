@@ -195,6 +195,69 @@ export interface StudentMemoryResponse {
   generated_at: string;
 }
 
+export type CriticVerdict = "approve" | "reject";
+export type CriticSeverity = "low" | "medium" | "high";
+
+export interface CriticDecisionItem {
+  id: string;
+  session_id: string;
+  hint_level: number;
+  verdict: CriticVerdict;
+  severity: CriticSeverity;
+  reasons: string[];
+  original_hint: string;
+  regenerated_hint: string | null;
+  created_at: string;
+}
+
+export interface CriticDecisionsResponse {
+  decisions: CriticDecisionItem[];
+  total: number;
+}
+
+// ── Practice agent (problem generator + verifier) ────────────────────────────
+
+export type PracticeDifficulty = "easy" | "medium" | "hard";
+export type PracticeVerifierKind = "sympy" | "rubric_llm" | "none";
+export type PracticeVerifierStatus = "verified" | "rejected" | "unverified";
+
+export interface GeneratedProblem {
+  id: string;
+  subject: string;
+  concept: string | null;
+  concept_label: string | null;
+  difficulty: PracticeDifficulty;
+  prompt_text: string;
+  /** Populated only after the student has attempted (or in history responses). */
+  explanation: string | null;
+  verifier_kind: PracticeVerifierKind;
+  verifier_status: PracticeVerifierStatus;
+  verifier_notes: string[];
+  generation_attempts: number;
+  attempted: boolean;
+  correct: boolean | null;
+  created_at: string;
+  /** Server intentionally withholds the answer key until after the attempt. */
+  answer_key: string | null;
+}
+
+export interface PracticeHistoryResponse {
+  problems: GeneratedProblem[];
+}
+
+export interface PracticeAttemptResponse {
+  correct: boolean;
+  answer_key: string;
+  explanation: string;
+  already_attempted: boolean;
+}
+
+export interface PracticeHealthResponse {
+  enabled: boolean;
+  max_retries: number;
+  generated_at: string;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -338,6 +401,24 @@ export const api = {
       `/api/student/${studentId}/memory${subject ? `?subject=${encodeURIComponent(subject)}` : ""}`,
     ),
 
+  /**
+   * Fetch recent Socratic-critic decisions for a student. Teachers see
+   * everything; students see their own. Pass `only_rejects=true` for the
+   * "Recent critic rejects" panel on the teacher dashboard.
+   */
+  getCriticDecisions: (
+    studentId: string,
+    opts?: { limit?: number; onlyRejects?: boolean },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.onlyRejects) params.set("only_rejects", "true");
+    const qs = params.toString();
+    return apiFetch<CriticDecisionsResponse>(
+      `/api/student/${studentId}/critic-decisions${qs ? `?${qs}` : ""}`,
+    );
+  },
+
   /** Log out by removing token. */
   logout: () => {
     localStorage.removeItem("studyowl_token");
@@ -413,5 +494,46 @@ export const api = {
     apiFetch<TeacherAlert>(`/api/alert/${alertId}/resolve`, {
       method: "POST",
     }),
+
+  /**
+   * Generate a fresh practice problem. If `concept` is omitted, the backend
+   * picks the student's weakest concept from their knowledge-graph memory.
+   * Difficulty is auto-calibrated from decayed_confidence.
+   */
+  generatePracticeProblem: (opts?: { subject?: string; concept?: string }) =>
+    apiFetch<GeneratedProblem>("/api/practice/generate", {
+      method: "POST",
+      body: JSON.stringify({
+        subject: opts?.subject ?? null,
+        concept: opts?.concept ?? null,
+      }),
+    }),
+
+  /** Submit a student's answer for a generated practice problem. */
+  submitPracticeAttempt: (problemId: string, answer: string) =>
+    apiFetch<PracticeAttemptResponse>(`/api/practice/${problemId}/attempt`, {
+      method: "POST",
+      body: JSON.stringify({ answer }),
+    }),
+
+  /** Fetch the caller's practice history. Teachers may pass studentId. */
+  getPracticeProblems: (opts?: {
+    studentId?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts?.studentId) params.set("student_id", opts.studentId);
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    return apiFetch<PracticeHistoryResponse>(
+      `/api/practice/problems${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  /** Lightweight health probe — useful to disable the UI when the killswitch is off. */
+  getPracticeHealth: () =>
+    apiFetch<PracticeHealthResponse>("/api/practice/health"),
 };
 

@@ -221,3 +221,80 @@ async def get_review_concepts(
     threshold = settings.memory_review_threshold
     weak = [c for c in all_concepts if c["decayed_confidence"] < threshold]
     return weak[:limit]
+
+
+# ── Practice-agent close-the-loop ────────────────────────────────────────────
+
+
+async def bump_concept_after_practice(
+    db: AsyncSession,
+    student_id: UUID,
+    concept: str,
+    subject: str,
+    correct: bool,
+    label: str | None = None,
+) -> ConceptMemory | None:
+    """
+    Update (or insert) a student_concept_memory row after a practice attempt.
+
+    Mirrors the 0.6/0.4 blend rule used by `_consolidate_inner`: the new
+    signal is weighted 0.6, the (decayed) prior 0.4. A correct attempt
+    contributes a signal of 0.9, a wrong one 0.2 — chosen so a single
+    correct answer can meaningfully move a struggling concept toward
+    "partial", and a single wrong answer can knock a "mastered" concept
+    back into "partial" if it'd been decaying anyway.
+
+    Returns the touched row, or None when consolidation is disabled via
+    `memory_consolidation_enabled` (same killswitch as the session path).
+    """
+    if not settings.memory_consolidation_enabled:
+        return None
+    if not concept:
+        return None
+
+    signal = 0.9 if correct else 0.2
+
+    existing = await db.execute(
+        select(ConceptMemory).where(
+            ConceptMemory.student_id == student_id,
+            ConceptMemory.concept == concept,
+        )
+    )
+    row = existing.scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if row is None:
+        blended = signal
+    else:
+        prior_decayed = decayed_confidence(row.confidence, row.last_seen, now=now)
+        blended = 0.6 * signal + 0.4 * prior_decayed
+
+    blended = max(0.0, min(1.0, blended))
+    status = derive_status(blended)
+
+    if row is None:
+        row = ConceptMemory(
+            student_id=student_id,
+            subject=subject,
+            concept=concept,
+            label=label or concept.replace("-", " ").title(),
+            status=status,
+            confidence=blended,
+            attempts_count=1,
+            correct_count=1 if correct else 0,
+            last_seen=now,
+            last_session_id=None,
+        )
+        db.add(row)
+    else:
+        row.subject = subject
+        if label:
+            row.label = label
+        row.confidence = blended
+        row.status = status
+        row.attempts_count = row.attempts_count + 1
+        row.correct_count = row.correct_count + (1 if correct else 0)
+        row.last_seen = now
+
+    await db.commit()
+    return row

@@ -85,6 +85,7 @@ def _build_hint_user_message(
     previous_attempts: list[str],
     previous_clarifications: list[tuple[str, str]] | None = None,
     prior_concepts: list[dict] | None = None,
+    critic_feedback: dict | None = None,
 ) -> str:
     """
     Build the user-message body for a hint request, including the conversation
@@ -135,6 +136,21 @@ def _build_hint_user_message(
     if kg_section:
         parts.append(kg_section)
 
+    if critic_feedback:
+        prior_draft = critic_feedback.get("prior_draft") or ""
+        reasons = critic_feedback.get("reasons") or []
+        if prior_draft or reasons:
+            reasons_rendered = (
+                "\n".join(f"- {r}" for r in reasons) if reasons else "- (no reasons given)"
+            )
+            parts.append(
+                "Your previous draft was REJECTED by the critic. Do not repeat it.\n\n"
+                f"Rejected draft:\n{prior_draft}\n\n"
+                f"Critic's reasons:\n{reasons_rendered}\n\n"
+                "Write a different hint that fixes these issues while staying within "
+                "the rules for this hint level."
+            )
+
     return "\n\n".join(parts)
 
 
@@ -146,6 +162,7 @@ async def get_hint(
     previous_hints: list[str] | None = None,
     previous_clarifications: list[tuple[str, str]] | None = None,
     prior_concepts: list[dict] | None = None,
+    critic_feedback: dict | None = None,
 ) -> str:
     """
     Generate a Socratic hint for the given question at the specified hint level.
@@ -172,6 +189,7 @@ async def get_hint(
         previous_attempts=previous_attempts,
         previous_clarifications=previous_clarifications,
         prior_concepts=prior_concepts,
+        critic_feedback=critic_feedback,
     )
 
     # Wrap sync OpenAI call in thread pool to avoid blocking event loop
@@ -257,6 +275,7 @@ async def stream_hint(
     previous_hints: list[str] | None = None,
     previous_clarifications: list[tuple[str, str]] | None = None,
     prior_concepts: list[dict] | None = None,
+    critic_feedback: dict | None = None,
 ) -> AsyncIterator[str]:
     """
     Stream a hint as text chunks (token-ish granularity from Azure OpenAI).
@@ -277,6 +296,7 @@ async def stream_hint(
         previous_attempts=previous_attempts,
         previous_clarifications=previous_clarifications,
         prior_concepts=prior_concepts,
+        critic_feedback=critic_feedback,
     )
 
     queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=64)

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from uuid import UUID
 
 from db import get_db
+from models.critic_decision import CriticDecision
 from models.student import Student
 from models.session import Session
 from routers.auth import get_current_student
@@ -71,6 +72,23 @@ class ConceptMemoryItem(BaseModel):
 class StudentMemoryResponse(BaseModel):
     concepts: list[ConceptMemoryItem]
     generated_at: str
+
+
+class CriticDecisionItem(BaseModel):
+    id: str
+    session_id: str
+    hint_level: int
+    verdict: str
+    severity: str
+    reasons: list[str]
+    original_hint: str
+    regenerated_hint: str | None
+    created_at: str
+
+
+class CriticDecisionsResponse(BaseModel):
+    decisions: list[CriticDecisionItem]
+    total: int
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -222,6 +240,65 @@ async def get_student_memory(
     return StudentMemoryResponse(
         concepts=[ConceptMemoryItem(**c) for c in concepts],
         generated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.get(
+    "/{student_id}/critic-decisions",
+    response_model=CriticDecisionsResponse,
+)
+async def get_student_critic_decisions(
+    student_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    only_rejects: bool = Query(False),
+    current_student: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return recent Socratic-critic decisions for a student. Teachers see
+    everything; students see their own (useful for self-introspection).
+
+    `only_rejects=true` filters to verdict='reject' — the interesting set for
+    the teacher dashboard "Recent critic rejects" panel.
+    """
+    try:
+        student_uuid = UUID(student_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid student ID")
+
+    if current_student.role == "student":
+        if str(current_student.id) != student_id:
+            raise HTTPException(status_code=403, detail="Students can only view their own decisions")
+    elif current_student.role != "teacher":
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    stmt = (
+        select(CriticDecision)
+        .where(CriticDecision.student_id == student_uuid)
+        .order_by(CriticDecision.created_at.desc())
+        .limit(limit)
+    )
+    if only_rejects:
+        stmt = stmt.where(CriticDecision.verdict == "reject")
+
+    rows = (await db.execute(stmt)).scalars().all()
+
+    return CriticDecisionsResponse(
+        decisions=[
+            CriticDecisionItem(
+                id=str(d.id),
+                session_id=str(d.session_id),
+                hint_level=d.hint_level,
+                verdict=d.verdict,
+                severity=d.severity,
+                reasons=[r for r in (d.reasons or "").split("\n") if r],
+                original_hint=d.original_hint,
+                regenerated_hint=d.regenerated_hint,
+                created_at=d.created_at.isoformat(),
+            )
+            for d in rows
+        ],
+        total=len(rows),
     )
 
 

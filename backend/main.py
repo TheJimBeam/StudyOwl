@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from db import init_db
-from routers import sessions, alerts, progress, auth
+from routers import sessions, alerts, progress, auth, practice
 from services import inactivity_scheduler
 
 
@@ -71,6 +71,7 @@ app.include_router(auth.router,     prefix="/api/auth",     tags=["auth"])
 app.include_router(sessions.router, prefix="/api/session",  tags=["sessions"])
 app.include_router(progress.router, prefix="/api/student",  tags=["progress"])
 app.include_router(alerts.router,   prefix="/api/alert",    tags=["alerts"])
+app.include_router(practice.router, prefix="/api/practice", tags=["practice"])
 
 
 @app.get("/health")
