@@ -9,6 +9,8 @@ from .alert import Alert
 from .concept_memory import ConceptMemory
 from .critic_decision import CriticDecision
 from .generated_problem import GeneratedProblem
+from .copilot_report import CopilotReport
+from .copilot_pattern import CopilotPattern
 
 __all__ = [
     "Student",
@@ -18,4 +20,6 @@ __all__ = [
     "ConceptMemory",
     "CriticDecision",
     "GeneratedProblem",
+    "CopilotReport",
+    "CopilotPattern",
 ]

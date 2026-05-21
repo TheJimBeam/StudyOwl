@@ -3,12 +3,13 @@ Sessions router — start a session, submit attempts, retrieve session info.
 """
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from uuid import UUID
 
 from db import get_db
@@ -87,6 +88,23 @@ class SessionDetailResponse(BaseModel):
     resolved: bool
     started_at: str
     resolved_at: str | None = None
+
+
+COMMENT_MAX_LENGTH = 2000
+
+
+class TeacherCommentRequest(BaseModel):
+    # Pydantic enforces the 2000-char cap and non-emptiness; the route also
+    # trims whitespace before re-checking, so "   " is rejected too.
+    body: str = Field(..., min_length=1, max_length=COMMENT_MAX_LENGTH)
+
+
+class TeacherCommentResponse(BaseModel):
+    session_id: str
+    body: str
+    teacher_id: str
+    teacher_name: str
+    updated_at: str
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -270,3 +288,115 @@ async def get_session(
         started_at=session.started_at.isoformat(),
         resolved_at=session.resolved_at.isoformat() if session.resolved_at else None,
     )
+
+
+# ── Teacher comment ────────────────────────────────────────────────────────────
+
+
+async def _load_session_with_comment_author(db: AsyncSession, session_id: str) -> Session:
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
+
+    stmt = (
+        select(Session)
+        .options(joinedload(Session.comment_teacher))
+        .where(Session.id == session_uuid)
+    )
+    session = (await db.execute(stmt)).unique().scalars().first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+def _require_teacher(teacher: Student) -> None:
+    if teacher.role != "teacher":
+        raise HTTPException(
+            status_code=403, detail="Only teachers can comment on sessions"
+        )
+
+
+@router.put("/{session_id}/comment", response_model=TeacherCommentResponse)
+async def upsert_session_comment(
+    session_id: str,
+    payload: TeacherCommentRequest,
+    teacher: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Add or update the teacher's comment on a session. One comment per session:
+    if another teacher already commented, returns 409 — they must delete theirs
+    first.
+    """
+    _require_teacher(teacher)
+
+    body = payload.body.strip()
+    if not body:
+        raise HTTPException(status_code=422, detail="Comment body cannot be empty")
+    if len(body) > COMMENT_MAX_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Comment body exceeds {COMMENT_MAX_LENGTH} characters",
+        )
+
+    session = await _load_session_with_comment_author(db, session_id)
+
+    if (
+        session.teacher_comment_by_id is not None
+        and session.teacher_comment_by_id != teacher.id
+    ):
+        existing_name = (
+            session.comment_teacher.name if session.comment_teacher else "another teacher"
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=f"Already commented by {existing_name}",
+        )
+
+    now = datetime.now(timezone.utc)
+    session.teacher_comment_body = body
+    session.teacher_comment_by_id = teacher.id
+    session.teacher_comment_at = now
+    await db.commit()
+
+    # The current teacher *is* the author of the just-written comment, so we
+    # don't need to reload from the DB to populate the response. (Reloading
+    # would hit the identity-map cache and return a stale comment_teacher
+    # relationship under expire_on_commit=False.)
+    return TeacherCommentResponse(
+        session_id=str(session.id),
+        body=body,
+        teacher_id=str(teacher.id),
+        teacher_name=teacher.name,
+        updated_at=now.isoformat(),
+    )
+
+
+@router.delete("/{session_id}/comment", status_code=204)
+async def delete_session_comment(
+    session_id: str,
+    teacher: Student = Depends(get_current_student),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Delete the teacher's comment on a session. Owner-only: a teacher can only
+    delete a comment they wrote. 404 if there is no comment to delete.
+    """
+    _require_teacher(teacher)
+
+    session = await _load_session_with_comment_author(db, session_id)
+
+    if session.teacher_comment_body is None:
+        raise HTTPException(status_code=404, detail="No comment on this session")
+
+    if session.teacher_comment_by_id != teacher.id:
+        raise HTTPException(
+            status_code=403, detail="You can only delete your own comments"
+        )
+
+    session.teacher_comment_body = None
+    session.teacher_comment_by_id = None
+    session.teacher_comment_at = None
+    await db.commit()
+    return None

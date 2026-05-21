@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
+from sqlalchemy.orm import joinedload
 from pydantic import BaseModel
 from uuid import UUID
 
@@ -41,6 +42,13 @@ class StudentProgressResponse(BaseModel):
     recent_sessions: list[RecentSession]
 
 
+class TeacherCommentOut(BaseModel):
+    body: str
+    teacher_id: str
+    teacher_name: str
+    updated_at: str
+
+
 class HistorySession(BaseModel):
     id: str
     question: str
@@ -48,6 +56,7 @@ class HistorySession(BaseModel):
     resolved: bool
     started_at: str
     resolved_at: str | None = None
+    teacher_comment: TeacherCommentOut | None = None
 
 
 class StudentSessionHistoryResponse(BaseModel):
@@ -187,28 +196,39 @@ async def get_student_sessions(
 
     stmt = (
         select(Session)
+        .options(joinedload(Session.comment_teacher))
         .where(Session.student_id == student_uuid)
         .order_by(Session.started_at.desc())
         .limit(limit)
         .offset(offset)
     )
-    sessions = (await db.execute(stmt)).scalars().all()
+    sessions = (await db.execute(stmt)).unique().scalars().all()
 
     return StudentSessionHistoryResponse(
-        sessions=[
-            HistorySession(
-                id=str(s.id),
-                question=s.question,
-                subject=s.subject,
-                resolved=s.resolved,
-                started_at=s.started_at.isoformat(),
-                resolved_at=s.resolved_at.isoformat() if s.resolved_at else None,
-            )
-            for s in sessions
-        ],
+        sessions=[_history_session_out(s) for s in sessions],
         total=int(total),
         limit=limit,
         offset=offset,
+    )
+
+
+def _history_session_out(s: Session) -> HistorySession:
+    comment = None
+    if s.teacher_comment_body is not None and s.comment_teacher is not None:
+        comment = TeacherCommentOut(
+            body=s.teacher_comment_body,
+            teacher_id=str(s.comment_teacher.id),
+            teacher_name=s.comment_teacher.name,
+            updated_at=s.teacher_comment_at.isoformat() if s.teacher_comment_at else "",
+        )
+    return HistorySession(
+        id=str(s.id),
+        question=s.question,
+        subject=s.subject,
+        resolved=s.resolved,
+        started_at=s.started_at.isoformat(),
+        resolved_at=s.resolved_at.isoformat() if s.resolved_at else None,
+        teacher_comment=comment,
     )
 
 

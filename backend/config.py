@@ -105,5 +105,27 @@ class Settings(BaseSettings):
     travily_api_key: str = ""
     travily_api_url: str = ""
 
+    # Teacher Co-Pilot — weekly cross-class synthesis agent.
+    # Aggregates last completed ISO week of activity org-wide (no roster yet)
+    # and drafts a class-summary narrative + a 12-min mini-lesson per top pattern.
+    # Disabling `copilot_enabled` masks the feature in the API (the scheduler
+    # is independently gated by `copilot_scheduler_enabled`).
+    copilot_enabled: bool = True
+    copilot_scheduler_enabled: bool = True
+    # The scheduler wakes hourly; the idempotency check makes ticks cheap when
+    # the current ISO week already has a report.
+    copilot_scheduler_interval_seconds: int = 3600
+    copilot_narrator_timeout_seconds: int = 15
+    copilot_mini_lesson_timeout_seconds: int = 20
+    copilot_max_patterns_per_report: int = 3
+    # Skip patterns that affect fewer than this many distinct students.
+    copilot_min_cohort_size: int = 3
+    # Skip patterns where affected_count / cohort_count falls below this ratio.
+    copilot_min_affected_ratio: float = 0.30
+    # Manual /regenerate calls within this window return the existing report.
+    copilot_regenerate_min_interval_seconds: int = 300
+    # Empty string → falls back to azure_openai_deployment.
+    azure_openai_copilot_deployment: str = ""
+
 
 settings = Settings()

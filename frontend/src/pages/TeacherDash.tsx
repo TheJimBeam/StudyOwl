@@ -9,8 +9,10 @@ import type {
   TeacherAlertsResponse,
   TeacherMetricsResponse,
 } from '../api/studyowl'
+import { useAuth } from '../auth/AuthContext'
 import { usePolling } from '../hooks/usePolling'
 import { ConceptMastery } from '../components/ConceptMastery'
+import { CoPilotDigest } from '../components/CoPilotDigest'
 import { CriticDecisionsPanel } from '../components/CriticDecisionsPanel'
 
 const TABS = [
@@ -66,6 +68,7 @@ function formatTime(d: Date | null): string {
 export const TeacherDash: React.FC = () => {
   const navigate = useNavigate()
   const { studentId: urlStudentId } = useParams<{ studentId?: string }>()
+  const { user } = useAuth()
 
   const [students, setStudents] = useState<StudentSummary[]>([])
   const [studentsLoading, setStudentsLoading] = useState(true)
@@ -75,6 +78,7 @@ export const TeacherDash: React.FC = () => {
   const [criticDecisions, setCriticDecisions] = useState<CriticDecisionsResponse | null>(null)
   const [loadingStudent, setLoadingStudent] = useState(false)
   const [studentDetailError, setStudentDetailError] = useState<string | null>(null)
+  const [activeTopTab, setActiveTopTab] = useState<'analytics' | 'copilot'>('analytics')
   const [activeTab, setActiveTab] = useState<TabKey>('subjects')
   const [sessionHistory, setSessionHistory] = useState<HistorySession[]>([])
   const [sessionsTotal, setSessionsTotal] = useState(0)
@@ -90,10 +94,14 @@ export const TeacherDash: React.FC = () => {
   const [visibleCritic, setVisibleCritic] = useState(TAB_INITIAL)
   const alertsScrollRef = useRef<HTMLDivElement | null>(null)
   const tabContentRef = useRef<HTMLDivElement | null>(null)
-  // In-flight ack/resolve to prevent double-clicks. Keyed by alert ID.
+  // In-flight ack/resolve to prevent double-clicks. Keyed by alert ID for
+  // alert mutations and `comment-${sessionId}` for session-comment mutations.
   const [actionInFlight, setActionInFlight] = useState<Record<string, boolean>>({})
   // Errors from ack/resolve actions (separate from polling errors).
   const [actionError, setActionError] = useState<string | null>(null)
+  // Per-row draft text + edit toggle for the session-comment composer.
+  const [commentDraft, setCommentDraft] = useState<Record<string, string>>({})
+  const [editingComment, setEditingComment] = useState<Record<string, boolean>>({})
 
   const fetchAlerts = useCallback(
     (signal: AbortSignal) => api.getAlerts({ signal }),
@@ -122,6 +130,11 @@ export const TeacherDash: React.FC = () => {
   // URL is the source of truth for which student is selected. Fall back to the
   // first loaded student when the route is bare /teacher.
   const selectedStudentId = urlStudentId ?? students[0]?.id ?? null
+
+  const selectedStudent = useMemo(
+    () => students.find((s) => s.id === selectedStudentId) ?? null,
+    [students, selectedStudentId],
+  )
 
   const handleSelectStudent = (id: string) => {
     navigate(`/teacher/students/${id}`)
@@ -268,6 +281,66 @@ export const TeacherDash: React.FC = () => {
     }
   }
 
+  const reloadFirstSessionsPage = async () => {
+    if (!selectedStudentId) return
+    const res = await api.getStudentSessions(selectedStudentId, {
+      limit: Math.max(sessionHistory.length, SESSIONS_PAGE_SIZE),
+      offset: 0,
+    })
+    setSessionHistory(res.sessions)
+    setSessionsTotal(res.total)
+  }
+
+  const handlePostComment = async (sessionId: string) => {
+    const draft = (commentDraft[sessionId] ?? '').trim()
+    if (!draft) return
+    const key = `comment-${sessionId}`
+    if (actionInFlight[key]) return
+    setActionInFlight((m) => ({ ...m, [key]: true }))
+    setActionError(null)
+    try {
+      await api.upsertSessionComment(sessionId, draft)
+      setCommentDraft((d) => {
+        const next = { ...d }
+        delete next[sessionId]
+        return next
+      })
+      setEditingComment((e) => {
+        const next = { ...e }
+        delete next[sessionId]
+        return next
+      })
+      await reloadFirstSessionsPage()
+    } catch (err) {
+      setActionError((err as Error).message)
+    } finally {
+      setActionInFlight((m) => {
+        const next = { ...m }
+        delete next[key]
+        return next
+      })
+    }
+  }
+
+  const handleDeleteComment = async (sessionId: string) => {
+    const key = `comment-${sessionId}`
+    if (actionInFlight[key]) return
+    setActionInFlight((m) => ({ ...m, [key]: true }))
+    setActionError(null)
+    try {
+      await api.deleteSessionComment(sessionId)
+      await reloadFirstSessionsPage()
+    } catch (err) {
+      setActionError((err as Error).message)
+    } finally {
+      setActionInFlight((m) => {
+        const next = { ...m }
+        delete next[key]
+        return next
+      })
+    }
+  }
+
   const handleAlertsScroll = (e: React.UIEvent<HTMLDivElement>) => {
     if (visibleAlerts >= alerts.length) return
     const el = e.currentTarget
@@ -349,6 +422,7 @@ export const TeacherDash: React.FC = () => {
   useEffect(() => {
     const el = tabContentRef.current
     if (!el || !selectedStudentProgress || loadingStudent) return
+    if (activeTopTab !== 'analytics') return
     if (el.scrollHeight > el.clientHeight + 4) return
 
     if (activeTab === 'subjects') {
@@ -372,6 +446,7 @@ export const TeacherDash: React.FC = () => {
     // the latest state via its own closure check).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    activeTopTab,
     activeTab,
     selectedStudentProgress,
     loadingStudent,
@@ -390,8 +465,8 @@ export const TeacherDash: React.FC = () => {
   const error = studentsError ?? studentDetailError ?? actionError
 
   return (
-    <div className="h-screen bg-gray-100 overflow-hidden">
-      <div className="max-w-6xl mx-auto h-full flex flex-col p-3 sm:p-4">
+    <div className="min-h-screen bg-gray-100 lg:h-screen lg:overflow-hidden">
+      <div className="max-w-6xl mx-auto lg:h-full flex flex-col p-3 sm:p-4">
         <header className="flex-shrink-0 mb-4 sm:mb-6 flex items-start justify-between gap-3 sm:gap-4 flex-wrap">
           <div>
             <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-1 sm:mb-2">
@@ -411,8 +486,8 @@ export const TeacherDash: React.FC = () => {
         </header>
 
         <div className="flex-1 min-h-0 grid gap-6 lg:grid-cols-[320px_1fr]">
-          <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
-            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 max-h-[45%]">
+          <div className="flex flex-col gap-6 min-h-0 lg:overflow-hidden">
+            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 lg:max-h-[45%]">
               <div className="px-4 sm:px-6 pt-4 sm:pt-6 pb-3 flex-shrink-0">
                 <h2 className="text-xl font-bold text-gray-800">📚 Student Roster</h2>
               </div>
@@ -440,7 +515,7 @@ export const TeacherDash: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 flex-1">
+            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 lg:flex-1">
               <div className="px-4 sm:px-6 pt-4 sm:pt-6 pb-3 flex-shrink-0 flex items-center justify-between gap-2">
                 <h2 className="text-xl font-bold text-gray-800">⚠️ Alerts</h2>
                 {alerts.length > 0 && (
@@ -559,7 +634,7 @@ export const TeacherDash: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex flex-col gap-6 min-h-0 overflow-hidden">
+          <div className="flex flex-col gap-6 min-h-0 lg:overflow-hidden">
             <div className="bg-white rounded-lg shadow p-4 sm:p-6 flex-shrink-0">
               <h2 className="text-xl font-bold text-gray-800 mb-4">📊 Class Overview</h2>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
@@ -581,26 +656,73 @@ export const TeacherDash: React.FC = () => {
               </div>
             </div>
 
-            <div className="bg-white rounded-lg shadow flex flex-col min-h-0 flex-1">
-              <div className="px-4 sm:px-6 pt-4 sm:pt-6 flex-shrink-0">
-                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-                  <div className="min-w-0">
-                    <h2 className="text-xl font-bold text-gray-800">Student Analytics</h2>
-                    <p className="text-sm text-gray-500">View details for the selected student.</p>
-                  </div>
-                  <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700 whitespace-nowrap">
-                    {selectedStudentId ? 'Student selected' : 'Pick a student'}
-                  </span>
+            <div className="bg-white rounded-lg shadow-lg flex flex-col min-h-0 lg:flex-1 overflow-hidden">
+              <div className="px-4 sm:px-6 pt-4 sm:pt-5 flex-shrink-0">
+                <div
+                  role="tablist"
+                  aria-label="Dashboard sections"
+                  className="flex flex-wrap gap-2"
+                >
+                  <button
+                    role="tab"
+                    aria-selected={activeTopTab === 'analytics'}
+                    onClick={() => setActiveTopTab('analytics')}
+                    className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                      activeTopTab === 'analytics'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-500 hover:text-indigo-700'
+                    }`}
+                  >
+                    Student Analytics
+                  </button>
+                  <button
+                    role="tab"
+                    aria-selected={activeTopTab === 'copilot'}
+                    onClick={() => setActiveTopTab('copilot')}
+                    className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
+                      activeTopTab === 'copilot'
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-500 hover:text-indigo-700'
+                    }`}
+                  >
+                    Teacher Co-Pilot
+                  </button>
                 </div>
 
-                {selectedStudentProgress && !loadingStudent && (
+                <div className="mt-4">
+                  {activeTopTab === 'analytics' ? (
+                    <>
+                      <h2 className="text-2xl font-bold text-gray-800">
+                        {selectedStudent ? selectedStudent.name : 'Select a student'}
+                      </h2>
+                      <p className="text-sm text-gray-500 mt-1">
+                        {selectedStudent
+                          ? selectedStudent.grade_level
+                          : 'Pick a student from the roster on the left.'}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <h2 className="text-2xl font-bold text-gray-800">Weekly Digest</h2>
+                      <p className="text-sm text-gray-500 mt-1">Class-wide patterns</p>
+                    </>
+                  )}
+                </div>
+
+                {activeTopTab === 'analytics' && (
                   <div
                     role="tablist"
                     aria-label="Student analytics tabs"
-                    className="flex flex-wrap gap-1 border-b border-slate-200"
+                    className="flex flex-wrap gap-2 mt-4"
                   >
                     {TABS.map((tab) => {
                       const isActive = activeTab === tab.key
+                      const disabled = !selectedStudentProgress || loadingStudent
+                      const count =
+                        tab.key === 'subjects' ? subjectsTotal
+                        : tab.key === 'sessions' ? sessionsTotal
+                        : tab.key === 'concepts' ? conceptsTotal
+                        : criticRejectsTotal
                       return (
                         <button
                           key={tab.key}
@@ -609,13 +731,25 @@ export const TeacherDash: React.FC = () => {
                           aria-controls={`tab-panel-${tab.key}`}
                           id={`tab-${tab.key}`}
                           onClick={() => setActiveTab(tab.key)}
-                          className={`px-3 sm:px-4 py-2 text-sm font-medium rounded-t-lg transition-colors -mb-px border-b-2 ${
+                          disabled={disabled}
+                          className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium border transition ${
                             isActive
-                              ? 'border-indigo-600 text-indigo-700 bg-indigo-50/60'
-                              : 'border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : disabled
+                                ? 'bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed'
+                                : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-500 hover:text-indigo-700'
                           }`}
                         >
                           {tab.label}
+                          {!disabled && count > 0 && (
+                            <span
+                              className={`text-[11px] font-semibold rounded-full px-1.5 py-0.5 min-w-[20px] text-center ${
+                                isActive ? 'bg-white text-indigo-700' : 'bg-gray-100 text-gray-600'
+                              }`}
+                            >
+                              {count}
+                            </span>
+                          )}
                         </button>
                       )
                     })}
@@ -626,12 +760,21 @@ export const TeacherDash: React.FC = () => {
               <div
                 ref={tabContentRef}
                 className="px-4 sm:px-6 py-4 sm:py-5 overflow-y-auto flex-1 min-h-0"
-                onScroll={handleTabScroll}
+                onScroll={activeTopTab === 'analytics' ? handleTabScroll : undefined}
               >
-                {loadingStudent ? (
+                {activeTopTab === 'copilot' ? (
+                  <CoPilotDigest />
+                ) : loadingStudent ? (
                   <p className="text-gray-600">Loading student progress...</p>
                 ) : !selectedStudentProgress ? (
-                  <p className="text-gray-600">Select a student to see their analytics.</p>
+                  <div className="py-8 text-center">
+                    <p className="text-base font-semibold text-gray-800">
+                      Pick a student to begin
+                    </p>
+                    <p className="text-sm text-gray-500 mt-1 max-w-sm mx-auto">
+                      Choose a name from the roster on the left to see their subjects, sessions, concept mastery, and critic decisions.
+                    </p>
+                  </div>
                 ) : (
                   <>
                     {activeTab === 'subjects' && (
@@ -648,13 +791,21 @@ export const TeacherDash: React.FC = () => {
                           <>
                             <div className="space-y-3">
                               {visibleSubjectList.map((subject) => (
-                                <div key={subject.name} className="rounded-2xl bg-slate-50 p-4">
+                                <div
+                                  key={subject.name}
+                                  className="rounded-2xl bg-slate-50 p-4 border border-transparent hover:border-indigo-200 hover:bg-white hover:shadow-sm transition"
+                                >
                                   <div className="flex items-center justify-between gap-4">
                                     <p className="font-semibold text-slate-900">{subject.name}</p>
-                                    <p className="text-sm text-slate-600">{subject.sessions} sessions</p>
+                                    <div className="text-right">
+                                      <p className="text-sm font-semibold text-indigo-700">
+                                        {Math.round(subject.success_rate * 100)}%
+                                      </p>
+                                      <p className="text-xs text-slate-500">{subject.sessions} sessions</p>
+                                    </div>
                                   </div>
                                   <div className="mt-2 h-2 rounded-full bg-white">
-                                    <div className="h-full rounded-full bg-indigo-600" style={{ width: `${subject.success_rate * 100}%` }} />
+                                    <div className="h-full rounded-full bg-indigo-600 transition-all" style={{ width: `${subject.success_rate * 100}%` }} />
                                   </div>
                                 </div>
                               ))}
@@ -684,14 +835,139 @@ export const TeacherDash: React.FC = () => {
                         ) : (
                           <>
                             <div className="space-y-3">
-                              {sessionHistory.map((session) => (
-                                <div key={session.id} className="rounded-2xl border border-slate-200 bg-white p-4">
-                                  <p className="font-semibold text-slate-900 break-words">{session.question}</p>
-                                  <p className="text-sm text-slate-500">
-                                    {session.subject} • {session.resolved ? 'Resolved' : 'Open'} • {new Date(session.started_at).toLocaleString()}
-                                  </p>
-                                </div>
-                              ))}
+                              {sessionHistory.map((session) => {
+                                const comment = session.teacher_comment
+                                const isMine = !!(comment && user && comment.teacher_id === user.id)
+                                const isEditing = editingComment[session.id] === true
+                                const draft = commentDraft[session.id] ?? ''
+                                const commentKey = `comment-${session.id}`
+                                const busy = !!actionInFlight[commentKey]
+                                return (
+                                  <div
+                                    key={session.id}
+                                    className="rounded-2xl border border-slate-200 bg-white p-4 hover:border-indigo-300 hover:shadow-sm transition"
+                                  >
+                                    <p className="font-semibold text-slate-900 break-words">{session.question}</p>
+                                    <p className="text-sm text-slate-500 mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                                        {session.subject}
+                                      </span>
+                                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                                        session.resolved
+                                          ? 'bg-emerald-100 text-emerald-700'
+                                          : 'bg-amber-100 text-amber-700'
+                                      }`}>
+                                        {session.resolved ? 'Resolved' : 'Open'}
+                                      </span>
+                                      <span className="text-xs text-slate-500">
+                                        {new Date(session.started_at).toLocaleString()}
+                                      </span>
+                                    </p>
+
+                                    {!comment && (
+                                      <div className="mt-3 pt-3 border-t border-gray-100">
+                                        <textarea
+                                          value={draft}
+                                          onChange={(e) =>
+                                            setCommentDraft((d) => ({ ...d, [session.id]: e.target.value }))
+                                          }
+                                          rows={2}
+                                          maxLength={2000}
+                                          placeholder="Add a comment for the student..."
+                                          disabled={busy}
+                                          className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <button
+                                          type="button"
+                                          onClick={() => handlePostComment(session.id)}
+                                          disabled={busy || !draft.trim()}
+                                          className="mt-2 bg-indigo-600 text-white text-xs font-semibold py-1.5 px-3 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+                                        >
+                                          {busy ? 'Posting...' : 'Post comment'}
+                                        </button>
+                                      </div>
+                                    )}
+
+                                    {comment && isMine && isEditing && (
+                                      <div className="mt-3 pt-3 border-t border-gray-100">
+                                        <textarea
+                                          value={draft}
+                                          onChange={(e) =>
+                                            setCommentDraft((d) => ({ ...d, [session.id]: e.target.value }))
+                                          }
+                                          rows={2}
+                                          maxLength={2000}
+                                          disabled={busy}
+                                          className="w-full p-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                        <div className="mt-2 flex gap-2">
+                                          <button
+                                            type="button"
+                                            onClick={() => handlePostComment(session.id)}
+                                            disabled={busy || !draft.trim()}
+                                            className="bg-indigo-600 text-white text-xs font-semibold py-1.5 px-3 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+                                          >
+                                            {busy ? 'Saving...' : 'Save'}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setEditingComment((e) => {
+                                                const next = { ...e }
+                                                delete next[session.id]
+                                                return next
+                                              })
+                                              setCommentDraft((d) => {
+                                                const next = { ...d }
+                                                delete next[session.id]
+                                                return next
+                                              })
+                                            }}
+                                            disabled={busy}
+                                            className="text-xs font-semibold py-1.5 px-3 rounded-lg text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition"
+                                          >
+                                            Cancel
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {comment && !(isMine && isEditing) && (
+                                      <div className="mt-3 pt-3 border-t border-gray-100">
+                                        <p className="text-sm text-gray-700 whitespace-pre-wrap break-words">
+                                          {comment.body}
+                                        </p>
+                                        <p className="text-xs text-gray-500 mt-1">
+                                          — {comment.teacher_name} · {new Date(comment.updated_at).toLocaleString()}
+                                        </p>
+                                        {isMine && (
+                                          <div className="mt-2 flex gap-3">
+                                            <button
+                                              type="button"
+                                              onClick={() => {
+                                                setEditingComment((e) => ({ ...e, [session.id]: true }))
+                                                setCommentDraft((d) => ({ ...d, [session.id]: comment.body }))
+                                              }}
+                                              disabled={busy}
+                                              className="text-xs font-semibold text-indigo-700 hover:text-indigo-900 disabled:opacity-50"
+                                            >
+                                              Edit
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleDeleteComment(session.id)}
+                                              disabled={busy}
+                                              className="text-xs font-semibold text-red-700 hover:text-red-900 disabled:opacity-50"
+                                            >
+                                              {busy ? 'Deleting...' : 'Delete'}
+                                            </button>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
                             </div>
                             <div className="mt-4 text-center text-xs text-slate-400">
                               {sessionsLoadingMore
