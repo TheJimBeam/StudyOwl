@@ -22,8 +22,15 @@ class Student(Base):
     hashed_password = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # Relationships
-    sessions = relationship("Session", back_populates="student", cascade="all, delete-orphan")
+    # Relationships. `foreign_keys` is explicit because Session has two FKs to
+    # students.id (student_id and teacher_comment_by_id) — we only want this
+    # collection to traverse the former.
+    sessions = relationship(
+        "Session",
+        back_populates="student",
+        foreign_keys="Session.student_id",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<Student {self.email} ({self.role})>"

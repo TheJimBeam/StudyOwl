@@ -35,7 +35,7 @@ async def init_db() -> None:
     # Import models here to ensure they're registered with Base
     from models import (  # noqa: F401
         Student, Session, Attempt, Alert, ConceptMemory, CriticDecision,
-        GeneratedProblem,
+        GeneratedProblem, CopilotReport, CopilotPattern,
     )
 
     async with engine.begin() as conn:
@@ -60,6 +60,23 @@ async def init_db() -> None:
             await conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_sessions_last_activity_at "
                 "ON sessions (last_activity_at)"
+            ))
+
+            # Teacher comment on sessions. Three nullable columns travel together
+            # (body / author / timestamp). No backfill needed — pre-existing
+            # sessions just have a null comment.
+            await conn.execute(text(
+                "ALTER TABLE sessions "
+                "ADD COLUMN IF NOT EXISTS teacher_comment_body TEXT"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE sessions "
+                "ADD COLUMN IF NOT EXISTS teacher_comment_by_id UUID "
+                "REFERENCES students(id)"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE sessions "
+                "ADD COLUMN IF NOT EXISTS teacher_comment_at TIMESTAMPTZ"
             ))
 
             # PR 7: backfill one Alert row per legacy `teacher_alerted=True` session,

@@ -160,6 +160,13 @@ export interface TeacherMetricsResponse {
   pending_alerts: number;
 }
 
+export interface TeacherComment {
+  body: string;
+  teacher_id: string;
+  teacher_name: string;
+  updated_at: string;
+}
+
 export interface HistorySession {
   id: string;
   question: string;
@@ -167,6 +174,15 @@ export interface HistorySession {
   resolved: boolean;
   started_at: string;
   resolved_at: string | null;
+  teacher_comment: TeacherComment | null;
+}
+
+export interface TeacherCommentResponse {
+  session_id: string;
+  body: string;
+  teacher_id: string;
+  teacher_name: string;
+  updated_at: string;
 }
 
 export interface StudentSessionHistoryResponse {
@@ -258,6 +274,58 @@ export interface PracticeHealthResponse {
   generated_at: string;
 }
 
+// ── Teacher Co-Pilot (weekly cross-class synthesis) ──────────────────────────
+
+export type CopilotSignalKind =
+  | "level3_stuck"
+  | "repeated_failure"
+  | "concept_struggle";
+export type CopilotStatus = "pending" | "ready" | "failed";
+export type CopilotArtifactStatus = "ok" | "skipped" | "failed";
+
+export interface CopilotPattern {
+  id: string;
+  rank: number;
+  signal_kind: CopilotSignalKind;
+  subject: string;
+  concept: string | null;
+  concept_label: string | null;
+  affected_count: number;
+  cohort_count: number;
+  affected_ratio: number;
+  /** Server-rendered ratio-language headline. Never directive. */
+  headline: string;
+  mini_lesson_md: string | null;
+  mini_lesson_status: CopilotArtifactStatus;
+}
+
+export interface CopilotReport {
+  id: string;
+  iso_year: number;
+  iso_week: number;
+  week_start_at: string;
+  week_end_at: string;
+  status: CopilotStatus;
+  student_count: number;
+  session_count: number;
+  resolved_count: number;
+  narrative: string;
+  narrative_status: CopilotArtifactStatus;
+  generated_at: string;
+  regenerated_at: string | null;
+  patterns: CopilotPattern[];
+}
+
+export interface CopilotReportsResponse {
+  reports: CopilotReport[];
+}
+
+export interface CopilotRegenerateResponse {
+  report: CopilotReport;
+  /** True when the request fell inside the debounce window; report unchanged. */
+  debounced: boolean;
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -284,6 +352,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "API error");
   }
+  // 204 No Content has an empty body; some endpoints (e.g. DELETE comment)
+  // intentionally return nothing.
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -496,6 +567,23 @@ export const api = {
     }),
 
   /**
+   * Add or update the calling teacher's comment on a session. Throws on 409
+   * if another teacher has already commented — the error.message carries the
+   * server detail ("Already commented by <name>") so the UI can render it.
+   */
+  upsertSessionComment: (sessionId: string, body: string) =>
+    apiFetch<TeacherCommentResponse>(`/api/session/${sessionId}/comment`, {
+      method: "PUT",
+      body: JSON.stringify({ body }),
+    }),
+
+  /** Delete the calling teacher's comment on a session. Owner-only. */
+  deleteSessionComment: (sessionId: string) =>
+    apiFetch<void>(`/api/session/${sessionId}/comment`, {
+      method: "DELETE",
+    }),
+
+  /**
    * Generate a fresh practice problem. If `concept` is omitted, the backend
    * picks the student's weakest concept from their knowledge-graph memory.
    * Difficulty is auto-calibrated from decayed_confidence.
@@ -535,5 +623,35 @@ export const api = {
   /** Lightweight health probe — useful to disable the UI when the killswitch is off. */
   getPracticeHealth: () =>
     apiFetch<PracticeHealthResponse>("/api/practice/health"),
+
+  /**
+   * Fetch the latest Teacher Co-Pilot weekly digest. Returns null on cold
+   * start (no reports generated yet) — the UI should show the empty state.
+   */
+  getLatestCopilotReport: (opts?: { signal?: AbortSignal }) =>
+    apiFetch<CopilotReport | null>("/api/copilot/latest", {
+      signal: opts?.signal,
+    }),
+
+  /** Fetch recent Co-Pilot reports (history list). Defaults to 8 weeks. */
+  getCopilotReports: (opts?: { limit?: number; signal?: AbortSignal }) => {
+    const params = new URLSearchParams();
+    if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    return apiFetch<CopilotReportsResponse>(
+      `/api/copilot/reports${qs ? `?${qs}` : ""}`,
+      { signal: opts?.signal },
+    );
+  },
+
+  /**
+   * Force-regenerate the current ISO week's digest. The backend debounces
+   * by `copilot_regenerate_min_interval_seconds`; debounced calls return the
+   * existing report with `debounced=true`.
+   */
+  regenerateCopilotReport: () =>
+    apiFetch<CopilotRegenerateResponse>("/api/copilot/regenerate", {
+      method: "POST",
+    }),
 };
 

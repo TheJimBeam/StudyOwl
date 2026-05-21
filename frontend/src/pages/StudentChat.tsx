@@ -50,10 +50,12 @@ export const StudentChat: React.FC = () => {
   const [finalAnswer, setFinalAnswer] = useState<string | null>(null)
   const [progress, setProgress] = useState<StudentProgress | null>(null)
   const [progressError, setProgressError] = useState<string | null>(null)
-  // Weakest concept from the knowledge-graph memory — feeds the Practice Agent
-  // CTA. Refetched whenever historyVersion bumps OR a practice attempt resolves
+  // Full concept memory list — feeds the Practice Agent. The agent derives the
+  // weakest concept internally and also exposes the full list in its picker so
+  // students can choose a different concept/subject than the recommendation.
+  // Refetched whenever historyVersion bumps OR a practice attempt resolves
   // (memoryVersion below).
-  const [weakestConcept, setWeakestConcept] = useState<ConceptMemoryItem | null>(null)
+  const [conceptMemory, setConceptMemory] = useState<ConceptMemoryItem[]>([])
   const [memoryVersion, setMemoryVersion] = useState(0)
   const bumpMemory = () => setMemoryVersion((v) => v + 1)
   // Bumped after every session-state change that the history panel cares about
@@ -304,8 +306,8 @@ export const StudentChat: React.FC = () => {
   useEffect(() => {
     if (!user) return
     api.getStudentMemory(user.id)
-      .then((data) => setWeakestConcept(data.concepts[0] ?? null))
-      .catch(() => setWeakestConcept(null))
+      .then((data) => setConceptMemory(data.concepts))
+      .catch(() => setConceptMemory([]))
   }, [user, historyVersion, memoryVersion])
 
   return (
@@ -440,7 +442,7 @@ export const StudentChat: React.FC = () => {
 
         <div className="mb-6">
           <PracticeAgent
-            weakestConcept={weakestConcept}
+            concepts={conceptMemory}
             defaultSubject="math"
             onAttemptResolved={bumpMemory}
           />

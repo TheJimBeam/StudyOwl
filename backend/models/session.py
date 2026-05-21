@@ -32,9 +32,18 @@ class Session(Base):
     )
     resolved_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Single teacher comment per session (one teacher writes/edits/deletes).
+    # All three columns move together — either all null (no comment) or all set.
+    teacher_comment_body = Column(Text, nullable=True)
+    teacher_comment_by_id = Column(
+        UUID(as_uuid=True), ForeignKey("students.id"), nullable=True
+    )
+    teacher_comment_at = Column(DateTime(timezone=True), nullable=True)
+
     # Relationships
-    student = relationship("Student", back_populates="sessions")
+    student = relationship("Student", back_populates="sessions", foreign_keys=[student_id])
     attempts = relationship("Attempt", back_populates="session", cascade="all, delete-orphan")
+    comment_teacher = relationship("Student", foreign_keys=[teacher_comment_by_id])
 
     def __repr__(self) -> str:
         return f"<Session {self.id} ({self.subject}) - {'resolved' if self.resolved else 'open'}>"

@@ -11,8 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
 from db import init_db
-from routers import sessions, alerts, progress, auth, practice
-from services import inactivity_scheduler
+from routers import sessions, alerts, progress, auth, practice, copilot
+from services import inactivity_scheduler, copilot_scheduler
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Inactivity scheduler disabled via config.")
 
+    copilot_task: asyncio.Task | None = None
+    if settings.copilot_scheduler_enabled:
+        copilot_task = asyncio.create_task(copilot_scheduler.run())
+    else:
+        logger.info("Teacher Co-Pilot scheduler disabled via config.")
+
     try:
         yield
     finally:
-        if scheduler_task is not None:
-            scheduler_task.cancel()
+        for task in (scheduler_task, copilot_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await scheduler_task
+                await task
             except asyncio.CancelledError:
                 pass
 
@@ -72,6 +80,7 @@ app.include_router(sessions.router, prefix="/api/session",  tags=["sessions"])
 app.include_router(progress.router, prefix="/api/student",  tags=["progress"])
 app.include_router(alerts.router,   prefix="/api/alert",    tags=["alerts"])
 app.include_router(practice.router, prefix="/api/practice", tags=["practice"])
+app.include_router(copilot.router,  prefix="/api/copilot",  tags=["copilot"])
 
 
 @app.get("/health")

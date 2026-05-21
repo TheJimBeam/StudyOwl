@@ -152,6 +152,20 @@ export function QuestionHistoryPanel({ studentId, onSelect, version = 0 }: Props
                           {relativeTime(s.started_at)}
                         </span>
                       </div>
+                      {s.teacher_comment && (
+                        <div className="mt-3 pt-3 border-t border-slate-100">
+                          <p className="text-xs font-semibold text-indigo-700 mb-1">
+                            Teacher comment
+                          </p>
+                          <p className="text-sm text-slate-800 whitespace-pre-wrap break-words">
+                            {s.teacher_comment.body}
+                          </p>
+                          <p className="text-xs text-slate-500 mt-1">
+                            — {s.teacher_comment.teacher_name} ·{' '}
+                            {relativeTime(s.teacher_comment.updated_at)}
+                          </p>
+                        </div>
+                      )}
                     </button>
                   </li>
                 ))}
